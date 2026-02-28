@@ -31,11 +31,11 @@ token_info = {
 
 def set_token_path(path: str) -> None:
     """Set the global token path for OAuth storage.
-    
+
     Args:
         path: Path where the token should be stored
     """
-    token_info['token_path'] = path
+    token_info['token_path'] = os.path.expanduser(path)
 
 # Global flag for message filtering
 SAVE_TOKEN_MODE = True
