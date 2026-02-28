@@ -12,7 +12,9 @@ from pathlib import Path
 SCOPES = [
     'https://www.googleapis.com/auth/chat.spaces.readonly',
     'https://www.googleapis.com/auth/chat.messages',
+    'https://www.googleapis.com/auth/chat.memberships.readonly',
     'https://www.googleapis.com/auth/userinfo.profile',
+    'https://www.googleapis.com/auth/directory.readonly',
 ]
 
 # Cache for user display names: {user_id: display_name}
@@ -127,11 +129,71 @@ async def refresh_token(token_path: Optional[str] = None) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to refresh token: {str(e)}"
 
+def prefetch_space_members(space_name: str, creds: Credentials) -> None:
+    """Prefetch all members of a space and resolve their display names.
+
+    First collects user IDs from Chat API memberships, then resolves names
+    via People API directory lookup. Requires chat.memberships.readonly
+    and directory.readonly scopes.
+
+    Args:
+        space_name: The space to fetch members from (format: 'spaces/SPACE_ID')
+        creds: Valid credentials for API calls
+    """
+    try:
+        # Step 1: Get all member user IDs from Chat API
+        chat_service = build('chat', 'v1', credentials=creds)
+        user_ids = []
+        page_token = None
+        while True:
+            list_args = {'parent': space_name, 'pageSize': 100}
+            if page_token:
+                list_args['pageToken'] = page_token
+            response = chat_service.spaces().members().list(**list_args).execute()
+            for membership in response.get('memberships', []):
+                member = membership.get('member', {})
+                user_id = member.get('name', '')
+                display_name = member.get('displayName', '')
+                if display_name and user_id:
+                    _user_display_name_cache[user_id] = display_name
+                elif user_id and user_id not in _user_display_name_cache:
+                    user_ids.append(user_id)
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+
+        # Step 2: Resolve names via People API for uncached users
+        if user_ids:
+            people_service = build('people', 'v1', credentials=creds)
+            # People API getBatchGet supports up to 200 resource names
+            resource_names = [uid.replace('users/', 'people/') for uid in user_ids]
+            for i in range(0, len(resource_names), 50):
+                batch = resource_names[i:i+50]
+                try:
+                    result = people_service.people().getBatchGet(
+                        resourceNames=batch,
+                        personFields='names'
+                    ).execute()
+                    for person_response in result.get('responses', []):
+                        person = person_response.get('person', {})
+                        resource_name = person.get('resourceName', '')
+                        user_id = resource_name.replace('people/', 'users/')
+                        names = person.get('names', [])
+                        if names:
+                            display_name = names[0].get('displayName', '')
+                            if display_name:
+                                _user_display_name_cache[user_id] = display_name
+                except Exception:
+                    pass  # People API batch failed, continue with what we have
+    except Exception:
+        pass  # Silently fail — will fall back to user IDs
+
+
 def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     """Get user display name with caching.
 
-    For HUMAN users: Uses People API to fetch display name.
-    For BOT users: Uses displayName from Chat API if available, otherwise returns bot identifier.
+    Checks cache first (populated by prefetch_space_members), then tries
+    People API for individual lookup, then falls back to raw user ID.
 
     Args:
         sender: The sender object from Chat API (contains 'name', 'type', optionally 'displayName')
@@ -143,7 +205,7 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     user_id = sender.get('name', '')
     sender_type = sender.get('type', 'HUMAN')
 
-    # Check if already cached
+    # Check if already cached (from prefetch_space_members)
     if user_id in _user_display_name_cache:
         return _user_display_name_cache[user_id]
 
@@ -152,36 +214,33 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
         _user_display_name_cache[user_id] = sender['displayName']
         return sender['displayName']
 
-    # For BOT type, we can't use People API
+    # For BOT type, extract short ID
     if sender_type == 'BOT':
-        # Extract short ID for readability
         short_id = user_id.replace('users/', '') if user_id else 'unknown'
         display_name = f"Bot ({short_id[:8]}...)"
         _user_display_name_cache[user_id] = display_name
         return display_name
 
-    # For HUMAN type, try People API
-    try:
-        person_id = user_id.replace('users/', 'people/')
+    # For HUMAN type, try People API individual lookup
+    if sender_type == 'HUMAN' and user_id:
+        try:
+            person_id = user_id.replace('users/', 'people/')
+            service = build('people', 'v1', credentials=creds)
+            person = service.people().get(
+                resourceName=person_id,
+                personFields='names'
+            ).execute()
+            names = person.get('names', [])
+            if names:
+                display_name = names[0].get('displayName', user_id)
+                _user_display_name_cache[user_id] = display_name
+                return display_name
+        except Exception:
+            pass
 
-        service = build('people', 'v1', credentials=creds)
-        person = service.people().get(
-            resourceName=person_id,
-            personFields='names'
-        ).execute()
-
-        names = person.get('names', [])
-        if names:
-            display_name = names[0].get('displayName', user_id)
-        else:
-            display_name = user_id
-
-        _user_display_name_cache[user_id] = display_name
-        return display_name
-    except Exception as e:
-        # If lookup fails, cache and return the original user_id
-        _user_display_name_cache[user_id] = user_id
-        return user_id
+    # Fallback: return user_id
+    _user_display_name_cache[user_id] = user_id
+    return user_id
 
 
 # MCP functions
@@ -262,6 +321,9 @@ async def list_space_messages(space_name: str,
         if not SAVE_TOKEN_MODE:
             return messages
 
+        # Prefetch space members to resolve display names
+        prefetch_space_members(space_name, creds)
+
         filtered_messages = []
         for msg in messages:
             sender = msg.get('sender', {})
@@ -279,4 +341,45 @@ async def list_space_messages(space_name: str,
         
     except Exception as e:
         raise Exception(f"Failed to list messages in space: {str(e)}")
-    
+
+
+async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None) -> Dict:
+    """Send a message to a Google Chat space.
+
+    Args:
+        space_name: The space to send to (format: 'spaces/SPACE_ID')
+        text: The message text to send
+        thread_key: Optional thread key to reply in a specific thread
+
+    Returns:
+        The created message object
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        service = build('chat', 'v1', credentials=creds)
+
+        body = {'text': text}
+
+        kwargs = {
+            'parent': space_name,
+            'body': body,
+        }
+
+        if thread_key:
+            body['thread'] = {'threadKey': thread_key}
+            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+
+        result = service.spaces().messages().create(**kwargs).execute()
+        return {
+            'name': result.get('name'),
+            'createTime': result.get('createTime'),
+            'text': result.get('text'),
+            'thread': result.get('thread'),
+            'space': result.get('space', {}).get('name'),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to send message: {str(e)}")
+

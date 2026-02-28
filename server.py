@@ -1,5 +1,4 @@
 # server.py
-import httpx
 import sys
 import argparse
 from typing import List, Dict
@@ -10,39 +9,7 @@ from server_auth import run_auth_server
 from auth_cli import run_cli_auth
 
 # Create an MCP server
-mcp = FastMCP("Demo")
-
-# Add an addition tool
-@mcp.tool()
-def add(a: int, b: int) -> int:
-    """Add two numbers"""
-    return a + b
-
-name = "GG"
-
-# Add a dynamic greeting resource
-@mcp.resource("greeting://{name}")
-def get_greeting(name: str) -> str:
-    """Get a personalized greeting"""
-    return f"Hello, {name}!"
-
-@mcp.tool()
-async def fetch_weather(city: str) -> str:
-    """Fetch current weather for a city"""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"https://api.weather.com/{city}"
-        )
-        return response.text
-
-@mcp.tool()
-async def get_ip_my_address(city: str) -> str:
-    """Get IP address from outian.net"""
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"http://outian.net/"
-        )
-        return response.text
+mcp = FastMCP("Google Chat")
 
 @mcp.tool()
 async def get_chat_spaces() -> List[Dict]:
@@ -103,6 +70,21 @@ async def get_space_messages(space_name: str,
         raise e
     
     return await list_space_messages(space_name, start_datetime, end_datetime)
+
+@mcp.tool()
+async def send_space_message(space_name: str, text: str, thread_key: str = None) -> Dict:
+    """Send a message to a Google Chat space.
+
+    Args:
+        space_name: The space to send to (format: 'spaces/SPACE_ID')
+        text: The message text to send
+        thread_key: Optional thread key to reply in a specific thread
+
+    Returns:
+        The created message object with name, createTime, text, thread, and space
+    """
+    from google_chat import send_space_message as _send
+    return await _send(space_name, text, thread_key)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MCP Server with Google Chat Authentication')
