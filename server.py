@@ -103,6 +103,94 @@ async def delete_space_message(message_name: str) -> Dict:
     from google_chat import delete_space_message as _delete
     return await _delete(message_name)
 
+@mcp.tool()
+async def get_message(message_name: str) -> Dict:
+    """Fetch a single message by its resource name.
+
+    Args:
+        message_name: The resource name of the message
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+
+    Returns:
+        The message object with name, sender, createTime, text, and thread
+    """
+    from google_chat import get_message as _get_message
+    return await _get_message(message_name)
+
+@mcp.tool()
+async def update_message(message_name: str, text: str) -> Dict:
+    """Edit the text of an existing message in a Google Chat space.
+
+    Only messages sent by the authenticated user can be edited.
+
+    Args:
+        message_name: The resource name of the message to update
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+        text: The new text content for the message
+
+    Returns:
+        The updated message object with name, createTime, lastUpdateTime, text, and thread
+    """
+    from google_chat import update_message as _update_message
+    return await _update_message(message_name, text)
+
+@mcp.tool()
+async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
+    """Add an emoji reaction to a message in a Google Chat space.
+
+    Args:
+        message_name: The resource name of the message to react to
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+        emoji_unicode: The Unicode emoji string to react with (e.g. '👍', '❤️', '😂')
+
+    Returns:
+        The created reaction object
+    """
+    from google_chat import create_reaction as _create_reaction
+    return await _create_reaction(message_name, emoji_unicode)
+
+@mcp.tool()
+async def list_reactions(message_name: str) -> List[Dict]:
+    """List all reactions on a message in a Google Chat space.
+
+    Args:
+        message_name: The resource name of the message
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+
+    Returns:
+        List of reaction objects, each containing emoji and user info
+    """
+    from google_chat import list_reactions as _list_reactions
+    return await _list_reactions(message_name)
+
+@mcp.tool()
+async def send_message_with_attachment(
+    space_name: str,
+    text: str,
+    file_url: str,
+    filename: str = None,
+    thread_name: str = None,
+) -> Dict:
+    """Send a message with a file link to a Google Chat space.
+
+    Simplified attachment implementation — embeds the file as a clickable link
+    in the message text. For true binary file uploads, a service account with
+    media.upload access is required; this version works with any OAuth credentials.
+
+    Args:
+        space_name: The space to send to (format: 'spaces/SPACE_ID')
+        text: The message text to accompany the file link
+        file_url: The URL of the file to link (e.g. a Google Drive share link or public URL)
+        filename: Optional display name for the file link. Defaults to the URL if not provided.
+        thread_name: Optional thread name to reply in an existing thread
+                    (format: 'spaces/SPACE_ID/threads/THREAD_ID')
+
+    Returns:
+        The created message object with name, createTime, text, thread, and space
+    """
+    from google_chat import send_message_with_attachment as _send_with_attachment
+    return await _send_with_attachment(space_name, text, file_url, filename, thread_name)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MCP Server with Google Chat Authentication')
     parser.add_argument('--auth', choices=['web', 'cli'],

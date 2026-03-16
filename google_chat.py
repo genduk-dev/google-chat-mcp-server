@@ -410,3 +410,181 @@ async def delete_space_message(message_name: str) -> Dict:
     except Exception as e:
         raise Exception(f"Failed to delete message: {str(e)}")
 
+
+async def get_message(message_name: str) -> Dict:
+    """Fetch a single message by its resource name.
+
+    Args:
+        message_name: The resource name of the message
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+
+    Returns:
+        The message object with name, sender, createTime, text, and thread
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        service = build('chat', 'v1', credentials=creds)
+        msg = service.spaces().messages().get(name=message_name).execute()
+
+        if not SAVE_TOKEN_MODE:
+            return msg
+
+        sender = msg.get('sender', {})
+        display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
+
+        return {
+            'name': msg.get('name'),
+            'sender': display_name,
+            'createTime': msg.get('createTime'),
+            'text': msg.get('text'),
+            'thread': msg.get('thread'),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to get message: {str(e)}")
+
+
+async def update_message(message_name: str, text: str) -> Dict:
+    """Edit the text of an existing message.
+
+    Args:
+        message_name: The resource name of the message to update
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+        text: The new text content for the message
+
+    Returns:
+        The updated message object with name, createTime, text, and thread
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        service = build('chat', 'v1', credentials=creds)
+        result = service.spaces().messages().patch(
+            name=message_name,
+            updateMask='text',
+            body={'text': text},
+        ).execute()
+
+        return {
+            'name': result.get('name'),
+            'createTime': result.get('createTime'),
+            'lastUpdateTime': result.get('lastUpdateTime'),
+            'text': result.get('text'),
+            'thread': result.get('thread'),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to update message: {str(e)}")
+
+
+async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
+    """Add an emoji reaction to a message.
+
+    Args:
+        message_name: The resource name of the message to react to
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+        emoji_unicode: The Unicode emoji string to react with (e.g. '👍', '❤️', '😂')
+
+    Returns:
+        The created reaction object
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        service = build('chat', 'v1', credentials=creds)
+        result = service.spaces().messages().reactions().create(
+            parent=message_name,
+            body={'emoji': {'unicode': emoji_unicode}},
+        ).execute()
+
+        return result
+    except Exception as e:
+        raise Exception(f"Failed to create reaction: {str(e)}")
+
+
+async def list_reactions(message_name: str) -> List[Dict]:
+    """List all reactions on a message.
+
+    Args:
+        message_name: The resource name of the message
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+
+    Returns:
+        List of reaction objects, each containing emoji and user info
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        service = build('chat', 'v1', credentials=creds)
+        result = service.spaces().messages().reactions().list(
+            parent=message_name,
+        ).execute()
+
+        return result.get('reactions', [])
+    except Exception as e:
+        raise Exception(f"Failed to list reactions: {str(e)}")
+
+
+async def send_message_with_attachment(
+    space_name: str,
+    text: str,
+    file_url: str,
+    filename: Optional[str] = None,
+    thread_name: Optional[str] = None,
+) -> Dict:
+    """Send a message with a file link to a Google Chat space.
+
+    NOTE: This is a simplified attachment implementation. The Google Chat API's
+    media.upload endpoint for user OAuth has significant restrictions (requires
+    service account or specific app configuration). This function sends a message
+    where the file is referenced as a clickable link embedded in the message text.
+    For true file uploads, use a service account with the Chat API media.upload
+    endpoint or share the file via Google Drive first.
+
+    Args:
+        space_name: The space to send to (format: 'spaces/SPACE_ID')
+        text: The message text to accompany the file link
+        file_url: The URL of the file to link (e.g. a Google Drive share link or public URL)
+        filename: Optional display name for the file link. Defaults to the URL if not provided.
+        thread_name: Optional thread name to reply in an existing thread
+                    (format: 'spaces/SPACE_ID/threads/THREAD_ID')
+
+    Returns:
+        The created message object with name, createTime, text, thread, and space
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        service = build('chat', 'v1', credentials=creds)
+
+        link_label = filename or file_url
+        full_text = f"{text}\n📎 {link_label}: {file_url}" if text else f"📎 {link_label}: {file_url}"
+
+        body = {'text': full_text}
+        kwargs = {'parent': space_name, 'body': body}
+
+        if thread_name:
+            body['thread'] = {'name': thread_name}
+            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+
+        result = service.spaces().messages().create(**kwargs).execute()
+
+        return {
+            'name': result.get('name'),
+            'createTime': result.get('createTime'),
+            'text': result.get('text'),
+            'thread': result.get('thread'),
+            'space': result.get('space', {}).get('name'),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to send message with attachment: {str(e)}")
+
