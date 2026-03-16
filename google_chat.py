@@ -330,6 +330,7 @@ async def list_space_messages(space_name: str,
             display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
 
             filtered_msg = {
+                'name': msg.get('name'),
                 'sender': display_name,
                 'createTime': msg.get('createTime'),
                 'text': msg.get('text'),
@@ -343,13 +344,14 @@ async def list_space_messages(space_name: str,
         raise Exception(f"Failed to list messages in space: {str(e)}")
 
 
-async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None) -> Dict:
+async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None, thread_name: Optional[str] = None) -> Dict:
     """Send a message to a Google Chat space.
 
     Args:
         space_name: The space to send to (format: 'spaces/SPACE_ID')
         text: The message text to send
-        thread_key: Optional thread key to reply in a specific thread
+        thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
+        thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
 
     Returns:
         The created message object
@@ -368,7 +370,10 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
             'body': body,
         }
 
-        if thread_key:
+        if thread_name:
+            body['thread'] = {'name': thread_name}
+            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+        elif thread_key:
             body['thread'] = {'threadKey': thread_key}
             kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
 
@@ -382,4 +387,26 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         }
     except Exception as e:
         raise Exception(f"Failed to send message: {str(e)}")
+
+
+async def delete_space_message(message_name: str) -> Dict:
+    """Delete a message from a Google Chat space.
+
+    Args:
+        message_name: The resource name of the message to delete
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+
+    Returns:
+        Confirmation dict
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        service = build('chat', 'v1', credentials=creds)
+        service.spaces().messages().delete(name=message_name).execute()
+        return {'deleted': message_name, 'success': True}
+    except Exception as e:
+        raise Exception(f"Failed to delete message: {str(e)}")
 

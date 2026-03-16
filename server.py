@@ -72,19 +72,36 @@ async def get_space_messages(space_name: str,
     return await list_space_messages(space_name, start_datetime, end_datetime)
 
 @mcp.tool()
-async def send_space_message(space_name: str, text: str, thread_key: str = None) -> Dict:
+async def send_space_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None) -> Dict:
     """Send a message to a Google Chat space.
 
     Args:
         space_name: The space to send to (format: 'spaces/SPACE_ID')
         text: The message text to send
-        thread_key: Optional thread key to reply in a specific thread
+        thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
+        thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
 
     Returns:
         The created message object with name, createTime, text, thread, and space
     """
     from google_chat import send_space_message as _send
-    return await _send(space_name, text, thread_key)
+    return await _send(space_name, text, thread_key, thread_name)
+
+@mcp.tool()
+async def delete_space_message(message_name: str) -> Dict:
+    """Delete a message from a Google Chat space.
+
+    Only messages sent by the authenticated bot/user can be deleted.
+
+    Args:
+        message_name: The resource name of the message to delete
+                     (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+
+    Returns:
+        Confirmation of deletion
+    """
+    from google_chat import delete_space_message as _delete
+    return await _delete(message_name)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MCP Server with Google Chat Authentication')
