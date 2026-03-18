@@ -1,6 +1,16 @@
-# Introduction
+# Google Chat MCP Server (Personal Fork)
+
+> **Fork of [chy168/google-chat-mcp-server](https://github.com/chy168/google-chat-mcp-server)** — customized for personal use with additional features.
 
 This project provides a Google Chat integration for MCP (Model Control Protocol) servers written by Python with FastMCP. It allows you to access and interact with Google Chat spaces and messages through MCP tools.
+
+### Additional features in this fork
+- Member prefetch with bulk People API name resolution
+- Send, delete, get, and update messages
+- Thread reply support (thread key and thread name)
+- Emoji reactions (create and list)
+- Message with file link attachment
+- Tilde expansion for token path
 
 ## Structure
 The project consists of two main components:
