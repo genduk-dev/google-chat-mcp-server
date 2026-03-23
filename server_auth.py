@@ -112,11 +112,7 @@ async def auth_callback(
 
         try:
             # Exchange auth code for credentials with offline access
-            flow.fetch_token(
-                code=code,
-                # Ensure we're requesting offline access for refresh tokens
-                access_type='offline'
-            )
+            flow.fetch_token(code=code)
             creds = flow.credentials
 
             # Verify we got a refresh token
