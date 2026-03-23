@@ -37,6 +37,29 @@ def _get_service(api: str, version: str, creds: Credentials) -> object:
         _service_cache[cache_key] = build(api, version, credentials=creds)
     return _service_cache[cache_key]
 
+def _build_send_kwargs(space_name: str, body: Dict, thread_key: Optional[str] = None, thread_name: Optional[str] = None) -> Dict:
+    """Build kwargs for spaces().messages().create() with thread and messageId handling."""
+    message_id = f"{APP_MESSAGE_PREFIX}{uuid.uuid4().hex[:12]}"
+    kwargs = {'parent': space_name, 'body': body, 'messageId': message_id}
+    if thread_name:
+        body['thread'] = {'name': thread_name}
+        kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+    elif thread_key:
+        body['thread'] = {'threadKey': thread_key}
+        kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+    return kwargs
+
+def _format_sent_message(result: Dict) -> Dict:
+    """Format a sent message API response into a consistent output dict."""
+    return {
+        'name': result.get('name'),
+        'createTime': result.get('createTime'),
+        'text': result.get('text'),
+        'thread': result.get('thread'),
+        'space': result.get('space', {}).get('name'),
+        'clientAssignedMessageId': result.get('clientAssignedMessageId'),
+    }
+
 # Max messages to fetch in a single list_space_messages call
 MAX_MESSAGES = 1000
 DEFAULT_CALLBACK_URL = "http://localhost:8000/auth/callback"
@@ -59,16 +82,16 @@ def set_token_path(path: str) -> None:
     token_info['token_path'] = os.path.expanduser(path)
 
 # Global flag for message filtering
-SAVE_TOKEN_MODE = True
+FILTER_MESSAGES = True
 
-def set_save_token_mode(enabled: bool) -> None:
+def set_filter_messages(enabled: bool) -> None:
     """Set whether to filter message fields to save tokens.
     
     Args:
         enabled: True to enable filtering, False to disable
     """
-    global SAVE_TOKEN_MODE
-    SAVE_TOKEN_MODE = enabled
+    global FILTER_MESSAGES
+    FILTER_MESSAGES = enabled
 
 def save_credentials(creds: Credentials, token_path: Optional[str] = None) -> None:
     """Save credentials to file and update in-memory cache.
@@ -205,10 +228,10 @@ def prefetch_space_members(space_name: str, creds: Credentials) -> None:
                             display_name = names[0].get('displayName', '')
                             if display_name:
                                 _user_display_name_cache[user_id] = display_name
-                except Exception:
-                    pass  # People API batch failed, continue with what we have
-    except Exception:
-        pass  # Silently fail — will fall back to user IDs
+                except Exception as e:
+                    logger.debug("People API batch lookup failed: %s", e)
+    except Exception as e:
+        logger.debug("Failed to prefetch space members: %s", e)
 
 
 def get_user_display_name(sender: Dict, creds: Credentials) -> str:
@@ -350,7 +373,7 @@ async def list_space_messages(space_name: str,
             if not page_token or len(messages) >= MAX_MESSAGES:
                 break
 
-        if not SAVE_TOKEN_MODE:
+        if not FILTER_MESSAGES:
             return messages
 
         # Prefetch space members to resolve display names
@@ -368,6 +391,7 @@ async def list_space_messages(space_name: str,
                 'sender_type': sender.get('type', 'HUMAN'),
                 'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
                 'createTime': msg.get('createTime'),
+                'lastUpdateTime': msg.get('lastUpdateTime'),
                 'text': msg.get('text'),
                 'thread': msg.get('thread')
             }
@@ -399,32 +423,10 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         service = _get_service('chat', 'v1', creds)
 
         body = {'text': text}
-
-        # Auto-assign client message ID with app prefix for attribution
-        message_id = f"{APP_MESSAGE_PREFIX}{uuid.uuid4().hex[:12]}"
-
-        kwargs = {
-            'parent': space_name,
-            'body': body,
-            'messageId': message_id,
-        }
-
-        if thread_name:
-            body['thread'] = {'name': thread_name}
-            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
-        elif thread_key:
-            body['thread'] = {'threadKey': thread_key}
-            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+        kwargs = _build_send_kwargs(space_name, body, thread_key, thread_name)
 
         result = service.spaces().messages().create(**kwargs).execute()
-        return {
-            'name': result.get('name'),
-            'createTime': result.get('createTime'),
-            'text': result.get('text'),
-            'thread': result.get('thread'),
-            'space': result.get('space', {}).get('name'),
-            'clientAssignedMessageId': result.get('clientAssignedMessageId'),
-        }
+        return _format_sent_message(result)
     except Exception as e:
         raise Exception(f"Failed to send message: {str(e)}")
 
@@ -469,7 +471,7 @@ async def get_message(message_name: str) -> Dict:
         service = _get_service('chat', 'v1', creds)
         msg = service.spaces().messages().get(name=message_name).execute()
 
-        if not SAVE_TOKEN_MODE:
+        if not FILTER_MESSAGES:
             return msg
 
         sender = msg.get('sender', {})
@@ -482,6 +484,7 @@ async def get_message(message_name: str) -> Dict:
             'sender_type': sender.get('type', 'HUMAN'),
             'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
             'createTime': msg.get('createTime'),
+            'lastUpdateTime': msg.get('lastUpdateTime'),
             'text': msg.get('text'),
             'thread': msg.get('thread'),
         }
@@ -623,26 +626,10 @@ async def send_message_with_attachment(
         full_text = f"{text}\n📎 {link_label}: {file_url}" if text else f"📎 {link_label}: {file_url}"
 
         body = {'text': full_text}
-        message_id = f"{APP_MESSAGE_PREFIX}{uuid.uuid4().hex[:12]}"
-        kwargs = {'parent': space_name, 'body': body, 'messageId': message_id}
-
-        if thread_name:
-            body['thread'] = {'name': thread_name}
-            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
-        elif thread_key:
-            body['thread'] = {'threadKey': thread_key}
-            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+        kwargs = _build_send_kwargs(space_name, body, thread_key, thread_name)
 
         result = service.spaces().messages().create(**kwargs).execute()
-
-        return {
-            'name': result.get('name'),
-            'createTime': result.get('createTime'),
-            'text': result.get('text'),
-            'thread': result.get('thread'),
-            'space': result.get('space', {}).get('name'),
-            'clientAssignedMessageId': result.get('clientAssignedMessageId'),
-        }
+        return _format_sent_message(result)
     except Exception as e:
         raise Exception(f"Failed to send message with attachment: {str(e)}")
 

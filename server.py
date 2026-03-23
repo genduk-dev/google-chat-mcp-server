@@ -3,7 +3,7 @@ import argparse
 from typing import List, Dict
 
 from fastmcp import FastMCP
-from google_chat import list_chat_spaces, DEFAULT_CALLBACK_URL, set_token_path, set_save_token_mode
+from google_chat import list_chat_spaces, DEFAULT_CALLBACK_URL, set_token_path, set_filter_messages
 from server_auth import run_auth_server
 from auth_cli import run_cli_auth
 
@@ -207,7 +207,7 @@ if __name__ == "__main__":
     set_token_path(args.token_path)
 
     # Set message filtering (disabled when --raw-messages is used)
-    set_save_token_mode(not args.raw_messages)
+    set_filter_messages(not args.raw_messages)
 
     if args.auth == 'web':
         print(f"\nStarting OAuth authentication server at http://{args.host}:{args.port}")
