@@ -23,6 +23,7 @@ from google_chat import (
     get_credentials,
     save_credentials,
     SCOPES,
+    DEFAULT_CALLBACK_URL,
     token_info
 )
 
@@ -49,7 +50,7 @@ def run_cli_auth(credentials_path: str = 'credentials.json'):
     flow = InstalledAppFlow.from_client_secrets_file(
         str(creds_file),
         SCOPES,
-        redirect_uri='http://localhost:8000/auth/callback'
+        redirect_uri=DEFAULT_CALLBACK_URL
     )
 
     # Generate authorization URL

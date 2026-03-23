@@ -1,4 +1,5 @@
 import os
+import logging
 import datetime
 import uuid
 from typing import List, Dict, Optional, Tuple
@@ -6,6 +7,8 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = [
@@ -18,6 +21,24 @@ SCOPES = [
 
 # Cache for user display names: {user_id: display_name}
 _user_display_name_cache: Dict[str, str] = {}
+
+# Cached API service objects (keyed by credentials token)
+_service_cache: Dict[str, object] = {}
+
+def _get_service(api: str, version: str, creds: Credentials) -> object:
+    """Get or create a cached Google API service object."""
+    cache_key = f"{api}:{version}:{creds.token}"
+    if cache_key not in _service_cache:
+        # Clear stale entries for same api:version with old tokens
+        prefix = f"{api}:{version}:"
+        stale = [k for k in _service_cache if k.startswith(prefix) and k != cache_key]
+        for k in stale:
+            del _service_cache[k]
+        _service_cache[cache_key] = build(api, version, credentials=creds)
+    return _service_cache[cache_key]
+
+# Max messages to fetch in a single list_space_messages call
+MAX_MESSAGES = 1000
 DEFAULT_CALLBACK_URL = "http://localhost:8000/auth/callback"
 DEFAULT_TOKEN_PATH = 'token.json'
 APP_MESSAGE_PREFIX = os.environ.get('APP_MESSAGE_PREFIX', 'client-genduk-')
@@ -95,7 +116,8 @@ def get_credentials(token_path: Optional[str] = None) -> Optional[Credentials]:
         try:
             creds.refresh(Request())
             save_credentials(creds, token_path)
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to refresh credentials: %s", e)
             return None
     
     return creds if (creds and creds.valid) else None
@@ -142,7 +164,7 @@ def prefetch_space_members(space_name: str, creds: Credentials) -> None:
     """
     try:
         # Step 1: Get all member user IDs from Chat API
-        chat_service = build('chat', 'v1', credentials=creds)
+        chat_service = _get_service('chat', 'v1', creds)
         user_ids = []
         page_token = None
         while True:
@@ -164,7 +186,7 @@ def prefetch_space_members(space_name: str, creds: Credentials) -> None:
 
         # Step 2: Resolve names via People API for uncached users
         if user_ids:
-            people_service = build('people', 'v1', credentials=creds)
+            people_service = _get_service('people', 'v1', creds)
             # People API getBatchGet supports up to 200 resource names
             resource_names = [uid.replace('users/', 'people/') for uid in user_ids]
             for i in range(0, len(resource_names), 50):
@@ -225,7 +247,7 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     if sender_type == 'HUMAN' and user_id:
         try:
             person_id = user_id.replace('users/', 'people/')
-            service = build('people', 'v1', credentials=creds)
+            service = _get_service('people', 'v1', creds)
             person = service.people().get(
                 resourceName=person_id,
                 personFields='names'
@@ -251,7 +273,7 @@ async def list_chat_spaces() -> List[Dict]:
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
             
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
         all_spaces = []
         page_token = None
         while True:
@@ -289,7 +311,7 @@ async def list_space_messages(space_name: str,
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
             
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
         
         # Prepare filter string based on provided dates
         filter_str = None
@@ -323,9 +345,9 @@ async def list_space_messages(space_name: str,
             current_page_messages = response.get('messages', [])
             if current_page_messages:
                 messages.extend(current_page_messages)
-            
+
             page_token = response.get('nextPageToken')
-            if not page_token:
+            if not page_token or len(messages) >= MAX_MESSAGES:
                 break
 
         if not SAVE_TOKEN_MODE:
@@ -374,7 +396,7 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
 
         body = {'text': text}
 
@@ -422,7 +444,7 @@ async def delete_space_message(message_name: str) -> Dict:
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
         service.spaces().messages().delete(name=message_name).execute()
         return {'deleted': message_name, 'success': True}
     except Exception as e:
@@ -444,7 +466,7 @@ async def get_message(message_name: str) -> Dict:
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
         msg = service.spaces().messages().get(name=message_name).execute()
 
         if not SAVE_TOKEN_MODE:
@@ -483,7 +505,7 @@ async def update_message(message_name: str, text: str) -> Dict:
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
         result = service.spaces().messages().patch(
             name=message_name,
             updateMask='text',
@@ -517,7 +539,7 @@ async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
         result = service.spaces().messages().reactions().create(
             parent=message_name,
             body={'emoji': {'unicode': emoji_unicode}},
@@ -543,7 +565,7 @@ async def list_reactions(message_name: str) -> List[Dict]:
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
         all_reactions = []
         page_token = None
         while True:
@@ -566,6 +588,7 @@ async def send_message_with_attachment(
     text: str,
     file_url: str,
     filename: Optional[str] = None,
+    thread_key: Optional[str] = None,
     thread_name: Optional[str] = None,
 ) -> Dict:
     """Send a message with a file link to a Google Chat space.
@@ -582,6 +605,7 @@ async def send_message_with_attachment(
         text: The message text to accompany the file link
         file_url: The URL of the file to link (e.g. a Google Drive share link or public URL)
         filename: Optional display name for the file link. Defaults to the URL if not provided.
+        thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread
                     (format: 'spaces/SPACE_ID/threads/THREAD_ID')
 
@@ -593,7 +617,7 @@ async def send_message_with_attachment(
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        service = build('chat', 'v1', credentials=creds)
+        service = _get_service('chat', 'v1', creds)
 
         link_label = filename or file_url
         full_text = f"{text}\n📎 {link_label}: {file_url}" if text else f"📎 {link_label}: {file_url}"
@@ -604,6 +628,9 @@ async def send_message_with_attachment(
 
         if thread_name:
             body['thread'] = {'name': thread_name}
+            kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
+        elif thread_key:
+            body['thread'] = {'threadKey': thread_key}
             kwargs['messageReplyOption'] = 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
 
         result = service.spaces().messages().create(**kwargs).execute()

@@ -18,8 +18,18 @@ from google_chat import (
     token_info
 )
 
-# Store OAuth flow state
-oauth_flows: Dict[str, InstalledAppFlow] = {}
+import time
+
+# Store OAuth flow state with timestamps for TTL cleanup
+oauth_flows: Dict[str, tuple] = {}  # {state: (flow, created_at)}
+FLOW_TTL_SECONDS = 600  # 10 minutes
+
+def _cleanup_expired_flows():
+    """Remove OAuth flows older than FLOW_TTL_SECONDS."""
+    now = time.monotonic()
+    expired = [s for s, (_, t) in oauth_flows.items() if now - t > FLOW_TTL_SECONDS]
+    for s in expired:
+        del oauth_flows[s]
 
 # Create FastAPI app for local auth server
 app = FastAPI(title="Google Chat Auth Server")
@@ -58,8 +68,9 @@ async def start_auth(callback_url: Optional[str] = Query(None)):
             include_granted_scopes='true'
         )
 
-        # Store the flow object for later use
-        oauth_flows[state] = flow
+        # Store the flow object with timestamp; clean up expired flows
+        _cleanup_expired_flows()
+        oauth_flows[state] = (flow, time.monotonic())
 
         # Redirect user to Google's auth page
         return RedirectResponse(url=auth_url)
@@ -90,34 +101,32 @@ async def auth_callback(
             )
 
         # Retrieve the flow object
-        flow = oauth_flows.get(state)
-        if not flow:
+        flow_entry = oauth_flows.get(state)
+        if not flow_entry:
             print(f"OAuth callback Error: Invalid state parameter")
             raise HTTPException(
                 status_code=400,
                 detail="Invalid state parameter"
             )
+        flow, _ = flow_entry
 
         try:
             # Exchange auth code for credentials with offline access
-            print("fetching token: ", code)
             flow.fetch_token(
                 code=code,
                 # Ensure we're requesting offline access for refresh tokens
                 access_type='offline'
             )
-            print("fetched credentials: ", flow.credentials)
             creds = flow.credentials
 
             # Verify we got a refresh token
             if not creds.refresh_token:
-                print(f"Error: No refresh token in credentials: {creds}")
+                print("Error: No refresh token received. Please try again.")
                 raise HTTPException(
                     status_code=400,
                     detail="Failed to obtain refresh token. Please try again."
                 )
             # Save credentials both to file and memory
-            print("saving credentials: ", creds)
             save_credentials(creds)
 
             # Clean up the flow object

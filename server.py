@@ -168,6 +168,7 @@ async def send_message_with_attachment(
     text: str,
     file_url: str,
     filename: str = None,
+    thread_key: str = None,
     thread_name: str = None,
 ) -> Dict:
     """Send a message with a file link to a Google Chat space.
@@ -181,6 +182,7 @@ async def send_message_with_attachment(
         text: The message text to accompany the file link
         file_url: The URL of the file to link (e.g. a Google Drive share link or public URL)
         filename: Optional display name for the file link. Defaults to the URL if not provided.
+        thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread
                     (format: 'spaces/SPACE_ID/threads/THREAD_ID')
 
@@ -188,7 +190,7 @@ async def send_message_with_attachment(
         The created message object with name, createTime, text, thread, and space
     """
     from google_chat import send_message_with_attachment as _send_with_attachment
-    return await _send_with_attachment(space_name, text, file_url, filename, thread_name)
+    return await _send_with_attachment(space_name, text, file_url, filename, thread_key, thread_name)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MCP Server with Google Chat Authentication')
