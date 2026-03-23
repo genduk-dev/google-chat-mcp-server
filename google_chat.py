@@ -332,6 +332,7 @@ async def list_space_messages(space_name: str,
             filtered_msg = {
                 'name': msg.get('name'),
                 'sender': display_name,
+                'sender_type': sender.get('type', 'HUMAN'),
                 'createTime': msg.get('createTime'),
                 'text': msg.get('text'),
                 'thread': msg.get('thread')
@@ -438,6 +439,7 @@ async def get_message(message_name: str) -> Dict:
         return {
             'name': msg.get('name'),
             'sender': display_name,
+            'sender_type': sender.get('type', 'HUMAN'),
             'createTime': msg.get('createTime'),
             'text': msg.get('text'),
             'thread': msg.get('thread'),
