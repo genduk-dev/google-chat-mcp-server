@@ -288,6 +288,53 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     return user_id
 
 
+async def list_space_members(space_name: str) -> List[Dict]:
+    """List all members of a space with their user IDs and display names.
+
+    Args:
+        space_name: The space to list members from (format: 'spaces/SPACE_ID')
+
+    Returns:
+        List of member dicts with 'user_id', 'display_name', and 'mention' fields
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        # Reuse prefetch to populate cache
+        prefetch_space_members(space_name, creds)
+
+        # Also collect raw membership data for role info
+        chat_service = _get_service('chat', 'v1', creds)
+        members = []
+        page_token = None
+        while True:
+            list_args = {'parent': space_name, 'pageSize': 100}
+            if page_token:
+                list_args['pageToken'] = page_token
+            response = chat_service.spaces().members().list(**list_args).execute()
+            for membership in response.get('memberships', []):
+                member = membership.get('member', {})
+                user_id = member.get('name', '')
+                if not user_id:
+                    continue
+                display_name = _user_display_name_cache.get(user_id, user_id)
+                members.append({
+                    'user_id': user_id,
+                    'display_name': display_name,
+                    'mention': f'<{user_id}>',
+                    'type': member.get('type', 'HUMAN'),
+                    'role': membership.get('role', 'ROLE_MEMBER'),
+                })
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+        return members
+    except Exception as e:
+        raise Exception(f"Failed to list space members: {str(e)}")
+
+
 # MCP functions
 async def list_chat_spaces() -> List[Dict]:
     """Lists all Google Chat spaces the bot has access to."""

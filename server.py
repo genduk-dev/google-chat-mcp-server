@@ -71,12 +71,32 @@ async def get_space_messages(space_name: str,
     return await list_space_messages(space_name, start_datetime, end_datetime)
 
 @mcp.tool()
+async def get_space_members(space_name: str) -> List[Dict]:
+    """List all members of a Google Chat space with their user IDs and display names.
+
+    Use this to look up user IDs for mentioning people in messages.
+    Each member includes a 'mention' field with the ready-to-use mention syntax.
+
+    Args:
+        space_name: The space to list members from (format: 'spaces/SPACE_ID')
+
+    Returns:
+        List of members with user_id, display_name, mention, type, and role
+    """
+    from google_chat import list_space_members
+    return await list_space_members(space_name)
+
+@mcp.tool()
 async def send_space_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None) -> Dict:
     """Send a message to a Google Chat space.
 
+    To mention a user, use the syntax <users/USER_ID> in the text.
+    Use get_space_members() to look up user IDs.
+    To mention everyone, use <users/all>.
+
     Args:
         space_name: The space to send to (format: 'spaces/SPACE_ID')
-        text: The message text to send
+        text: The message text to send (supports <users/USER_ID> mentions)
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
 
@@ -177,9 +197,12 @@ async def send_message_with_attachment(
     in the message text. For true binary file uploads, a service account with
     media.upload access is required; this version works with any OAuth credentials.
 
+    To mention a user, use the syntax <users/USER_ID> in the text.
+    Use get_space_members() to look up user IDs.
+
     Args:
         space_name: The space to send to (format: 'spaces/SPACE_ID')
-        text: The message text to accompany the file link
+        text: The message text to accompany the file link (supports <users/USER_ID> mentions)
         file_url: The URL of the file to link (e.g. a Google Drive share link or public URL)
         filename: Optional display name for the file link. Defaults to the URL if not provided.
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
