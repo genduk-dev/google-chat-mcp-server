@@ -1,5 +1,4 @@
 # server.py
-import sys
 import argparse
 from typing import List, Dict
 
@@ -198,15 +197,15 @@ if __name__ == "__main__":
     parser.add_argument('--host', default='localhost', help='Host to bind the auth server to (default: localhost)')
     parser.add_argument('--port', type=int, default=8000, help='Port to run the auth server on (default: 8000)')
     parser.add_argument('--token-path', default='token.json', help='Path to store OAuth token (default: token.json)')
-    parser.add_argument('--disable-token-saving', action='store_false', help='Disable token saving mode (enabled by default)')
+    parser.add_argument('--raw-messages', action='store_true', help='Return raw API messages without filtering fields (filtered by default)')
 
     args = parser.parse_args()
 
     # Set the token path for OAuth storage
     set_token_path(args.token_path)
 
-    # Set message filtering
-    set_save_token_mode(args.disable_token_saving)
+    # Set message filtering (disabled when --raw-messages is used)
+    set_save_token_mode(not args.raw_messages)
 
     if args.auth == 'web':
         print(f"\nStarting OAuth authentication server at http://{args.host}:{args.port}")

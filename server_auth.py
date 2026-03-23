@@ -1,11 +1,12 @@
+import os
+# Relax scope check - Google may return additional scopes that were previously granted
+os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, RedirectResponse
 import uvicorn
-import signal
-import asyncio
 from pathlib import Path
 from typing import Optional, Dict
-from datetime import datetime
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 from google_chat import (
@@ -212,24 +213,4 @@ def run_auth_server(port: int = 8000, host: str = "localhost"):
         port: Port to run the server on (default: 8000)
         host: Host to bind the server to (default: localhost)
     """
-    server_config = uvicorn.Config(app, host=host, port=port)
-    server = uvicorn.Server(server_config)
-    
-    # Handle graceful shutdown
-    def signal_handler(signum, frame):
-        print("\nReceived signal to terminate. Performing graceful shutdown...")
-        asyncio.create_task(server.shutdown())
-    
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)  # Handle Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # Handle termination signal
-    
-    try:
-        print(f"\nServer is running at: http://{host}:{port}")
-        print(f"Default callback URL: {DEFAULT_CALLBACK_URL}")
-        # Start the server
-        server.run()
-    except KeyboardInterrupt:
-        print("\nShutting down the auth server...")
-    finally:
-        print("Auth server has been stopped.") 
+    uvicorn.run(app, host=host, port=port) 

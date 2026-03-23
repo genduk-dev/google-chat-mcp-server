@@ -1,10 +1,8 @@
 import os
-import json
 import datetime
 import uuid
 from typing import List, Dict, Optional, Tuple
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from pathlib import Path
@@ -69,7 +67,7 @@ def save_credentials(creds: Credentials, token_path: Optional[str] = None) -> No
     
     # Update in-memory cache
     token_info['credentials'] = creds
-    token_info['last_refresh'] = datetime.datetime.utcnow()
+    token_info['last_refresh'] = datetime.datetime.now(datetime.timezone.utc)
 
 def get_credentials(token_path: Optional[str] = None) -> Optional[Credentials]:
     """Gets valid user credentials from storage or memory.
@@ -254,8 +252,18 @@ async def list_chat_spaces() -> List[Dict]:
             raise Exception("No valid credentials found. Please authenticate first.")
             
         service = build('chat', 'v1', credentials=creds)
-        spaces = service.spaces().list(pageSize=30).execute()
-        return spaces.get('spaces', [])
+        all_spaces = []
+        page_token = None
+        while True:
+            list_args = {'pageSize': 100}
+            if page_token:
+                list_args['pageToken'] = page_token
+            response = service.spaces().list(**list_args).execute()
+            all_spaces.extend(response.get('spaces', []))
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+        return all_spaces
     except Exception as e:
         raise Exception(f"Failed to list chat spaces: {str(e)}") 
 
@@ -536,11 +544,19 @@ async def list_reactions(message_name: str) -> List[Dict]:
             raise Exception("No valid credentials found. Please authenticate first.")
 
         service = build('chat', 'v1', credentials=creds)
-        result = service.spaces().messages().reactions().list(
-            parent=message_name,
-        ).execute()
+        all_reactions = []
+        page_token = None
+        while True:
+            list_args = {'parent': message_name, 'pageSize': 100}
+            if page_token:
+                list_args['pageToken'] = page_token
+            result = service.spaces().messages().reactions().list(**list_args).execute()
+            all_reactions.extend(result.get('reactions', []))
+            page_token = result.get('nextPageToken')
+            if not page_token:
+                break
 
-        return result.get('reactions', [])
+        return all_reactions
     except Exception as e:
         raise Exception(f"Failed to list reactions: {str(e)}")
 
@@ -583,7 +599,8 @@ async def send_message_with_attachment(
         full_text = f"{text}\n📎 {link_label}: {file_url}" if text else f"📎 {link_label}: {file_url}"
 
         body = {'text': full_text}
-        kwargs = {'parent': space_name, 'body': body}
+        message_id = f"{APP_MESSAGE_PREFIX}{uuid.uuid4().hex[:12]}"
+        kwargs = {'parent': space_name, 'body': body, 'messageId': message_id}
 
         if thread_name:
             body['thread'] = {'name': thread_name}
@@ -597,6 +614,7 @@ async def send_message_with_attachment(
             'text': result.get('text'),
             'thread': result.get('thread'),
             'space': result.get('space', {}).get('name'),
+            'clientAssignedMessageId': result.get('clientAssignedMessageId'),
         }
     except Exception as e:
         raise Exception(f"Failed to send message with attachment: {str(e)}")
