@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import uuid
 from typing import List, Dict, Optional, Tuple
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -329,10 +330,12 @@ async def list_space_messages(space_name: str,
             sender = msg.get('sender', {})
             display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
 
+            client_msg_id = msg.get('clientAssignedMessageId', '')
             filtered_msg = {
                 'name': msg.get('name'),
                 'sender': display_name,
                 'sender_type': sender.get('type', 'HUMAN'),
+                'sent_by_app': client_msg_id.startswith('client-genduk-') if client_msg_id else False,
                 'createTime': msg.get('createTime'),
                 'text': msg.get('text'),
                 'thread': msg.get('thread')
@@ -366,9 +369,13 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
 
         body = {'text': text}
 
+        # Auto-assign client message ID with genduk prefix for app attribution
+        message_id = f"client-genduk-{uuid.uuid4().hex[:12]}"
+
         kwargs = {
             'parent': space_name,
             'body': body,
+            'messageId': message_id,
         }
 
         if thread_name:
@@ -385,6 +392,7 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
             'text': result.get('text'),
             'thread': result.get('thread'),
             'space': result.get('space', {}).get('name'),
+            'clientAssignedMessageId': result.get('clientAssignedMessageId'),
         }
     except Exception as e:
         raise Exception(f"Failed to send message: {str(e)}")
@@ -436,10 +444,12 @@ async def get_message(message_name: str) -> Dict:
         sender = msg.get('sender', {})
         display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
 
+        client_msg_id = msg.get('clientAssignedMessageId', '')
         return {
             'name': msg.get('name'),
             'sender': display_name,
             'sender_type': sender.get('type', 'HUMAN'),
+            'sent_by_app': client_msg_id.startswith('client-genduk-') if client_msg_id else False,
             'createTime': msg.get('createTime'),
             'text': msg.get('text'),
             'thread': msg.get('thread'),
