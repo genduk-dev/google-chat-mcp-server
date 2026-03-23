@@ -1,163 +1,159 @@
 # Google Chat MCP Server (Personal Fork)
 
-> **Fork of [chy168/google-chat-mcp-server](https://github.com/chy168/google-chat-mcp-server)** — customized for personal use with additional features.
+> **Fork of [chy168/google-chat-mcp-server](https://github.com/chy168/google-chat-mcp-server)** with additional features for richer Google Chat interaction via MCP.
 
-This project provides a Google Chat integration for MCP (Model Control Protocol) servers written by Python with FastMCP. It allows you to access and interact with Google Chat spaces and messages through MCP tools.
+A Python MCP server that exposes Google Chat as tools for LLM clients. Read, send, edit, delete, and react to messages — all through the Model Context Protocol.
 
-### Additional features in this fork
-- Member prefetch with bulk People API name resolution
-- Send, delete, get, and update messages
-- Thread reply support (thread key and thread name)
-- Emoji reactions (create and list)
-- Message with file link attachment
-- Tilde expansion for token path
+## Fork Additions
 
-## Structure
-The project consists of two main components:
-
-1. **MCP Server with Google Chat Tools**: Provides tools for interacting with Google Chat through the Model Control Protocol.
-   - Written by FastMCP
-   - `server.py`: Main MCP server implementation with Google Chat tools
-   - `google_chat.py`: Google Chat API integration and authentication handling
-
-2. **Authentication Server**: Standalone component for Google account authentication
-   - Written by FastAPI
-   - Handles OAuth2 flow with Google
-   - Stores and manages access tokens
-   - Can be run independently or as part of the MCP server
-   - `server_auth.py`: Authentication server implementation
-
-The authentication flow allows you to obtain and refresh Google API tokens, which are then used by the MCP tools to access Google Chat data. (Your spaces and messages)
-
-
-## Features
-
-- OAuth2 authentication with Google Chat API
-- List available Google Chat spaces
-- Retrieve messages from specific spaces with date filtering
-- Local authentication server for easy setup
+- **Full message CRUD** — send, get, update, and delete messages
+- **Thread replies** — reply via `thread_key` (bot-initiated) or `thread_name` (existing thread)
+- **Emoji reactions** — create and list reactions on messages
+- **File link attachments** — send messages with clickable file links
+- **Smart name resolution** — bulk People API prefetch for display names
+- **App message tagging** — `clientAssignedMessageId` prefix to identify app-sent messages (configurable via `APP_MESSAGE_PREFIX` env var)
+- **Token-saving mode** — filtered message output by default; use `--raw-messages` for full API response
+- **CLI auth** — headless OAuth flow for remote/SSH environments
 
 ## Requirements
 
-- Python 3.13+
-- Google Cloud project with the following APIs enabled:
-  - Google Chat API
-  - People API (for user display names)
-- OAuth2 credentials from Google Cloud Console
+- Python 3.13
+- [uv](https://docs.astral.sh/uv/) package manager
+- Google Cloud project with these APIs enabled:
+  - [Google Chat API](https://console.cloud.google.com/apis/library/chat.googleapis.com)
+  - [People API](https://console.cloud.google.com/apis/library/people.googleapis.com)
+- OAuth2 client credentials (`credentials.json`) from [Google Cloud Console](https://console.cloud.google.com/auth/clients)
 
-# How to use?
+## Setup
 
-## Prepare Google Oauth Login
-1. Clone this project
-   ```
-   git clone https://github.com/chy168/google-chat-mcp-server.git
-   cd google-chat-mcp-server
-   ```
-2. Prepare a Google Cloud Project (GCP)
-3. Google Cloud Conolse (https://console.cloud.google.com/auth/overview?project=<YOUR_PROJECT_NAME>)
-4. Google Auth Platform > Clients > (+) Create client > Web application
-reference: https://developers.google.com/identity/protocols/oauth2/?hl=en
-Authorized JavaScript origins add: `http://localhost:8000`
-Authorized redirect URIs: `http://localhost:8000/auth/callback`
-5. After you create a OAuth 2.0 Client, download the client secrets as `.json` file. Save as `credentials.json` at top level of project.
+### 1. Clone and install
 
+```bash
+git clone https://github.com/genduk-dev/google-chat-mcp-server.git
+cd google-chat-mcp-server
+uv sync
+```
 
-## Authentication
+### 2. Create OAuth credentials
 
-There are two authentication modes available:
+1. Go to [Google Cloud Console > Auth Platform > Clients](https://console.cloud.google.com/auth/clients)
+2. Create a **Web application** client ([reference](https://developers.google.com/identity/protocols/oauth2/?hl=en))
+3. Add authorized JavaScript origin: `http://localhost:8000`
+4. Add authorized redirect URI: `http://localhost:8000/auth/callback`
+5. Download the client secrets JSON and save as `credentials.json` in the project root
 
-### Option 1: CLI Mode (Recommended for headless/remote environments)
+### 3. Authenticate
+
+**CLI mode** (recommended for headless/remote environments):
 ```bash
 uv run python server.py --auth cli
 ```
+Follow the prompts — open the URL in any browser, complete authorization, paste the redirect URL back.
 
-This will:
-1. Display an authorization URL
-2. Open the URL in any browser (can be on another device)
-3. Complete Google authorization
-4. Copy the redirect URL from browser and paste it back to terminal
-5. Token will be saved as `token.json`
-
-### Option 2: Web Mode (For environments with local browser)
+**Web mode** (local browser available):
 ```bash
 uv run python server.py --auth web --port 8000
 ```
+Open `http://localhost:8000/auth` and complete the Google login flow.
 
-- Open browser at http://localhost:8000/auth
-- Complete Google login
-- Token will be saved as `token.json`
+Both modes save the token to `token.json` (configurable via `--token-path`).
 
-## MCP Configuration (mcp.json)
-```
+## MCP Client Configuration
+
+```json
 {
-    "mcpServers": {
-        "google_chat": {
-            "command": "uv",
-            "args": [
-                "--directory",
-                "<YOUR_REPO_PATH>/google-chat-mcp-server",
-                "run",
-                "server.py",
-                "--token-path",
-                "<YOUR_REPO_PATH>/google-chat-mcp-server/token.json"
-            ]
-        }
+  "mcpServers": {
+    "google_chat": {
+      "command": "uv",
+      "args": [
+        "--directory", "/path/to/google-chat-mcp-server",
+        "run", "server.py",
+        "--token-path", "/path/to/google-chat-mcp-server/token.json"
+      ]
     }
+  }
+}
 ```
 
-## Docker / Podman
+## Tools
 
-### Run Container
+| Tool | Description |
+|------|-------------|
+| `get_chat_spaces()` | List all accessible Google Chat spaces |
+| `get_space_messages(space_name, start_date, end_date?)` | List messages with date filtering (YYYY-MM-DD) |
+| `get_message(message_name)` | Fetch a single message by resource name |
+| `send_space_message(space_name, text, thread_key?, thread_name?)` | Send a message, optionally in a thread |
+| `update_message(message_name, text)` | Edit a message's text |
+| `delete_space_message(message_name)` | Delete a message |
+| `create_reaction(message_name, emoji_unicode)` | Add an emoji reaction |
+| `list_reactions(message_name)` | List all reactions on a message |
+| `send_message_with_attachment(space_name, text, file_url, ...)` | Send a message with a file link |
+
+Resource name formats:
+- Space: `spaces/SPACE_ID`
+- Message: `spaces/SPACE_ID/messages/MESSAGE_ID`
+- Thread: `spaces/SPACE_ID/threads/THREAD_ID`
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_MESSAGE_PREFIX` | `client-genduk-` | Prefix for `clientAssignedMessageId` to identify app-sent messages |
+
+## Docker
+
+### Build image
 ```bash
-# Mount your project directory containing token.json
-docker run -it --rm \
-  -v /path/to/your/project:/data \
-  ghcr.io/chy168/google-chat-mcp-server:latest \
-  --token-path=/data/token.json
+docker build -t google-chat-mcp-server:latest .
+```
 
-# or with podman
-podman run -it --rm \
-  -v /path/to/your/project:/data \
-  ghcr.io/chy168/google-chat-mcp-server:latest \
+### Run MCP server
+```bash
+docker run -it --rm \
+  -v /path/to/project:/data \
+  google-chat-mcp-server:latest \
   --token-path=/data/token.json
 ```
 
-### Run Auth Server in Container
+### Run auth server in container
+
+> **Note:** `credentials.json` must be accessible inside the container at `/app/credentials.json`.
+
 ```bash
 # Web mode
 docker run -it --rm \
   -p 8000:8000 \
-  -v /path/to/your/project:/data \
-  ghcr.io/chy168/google-chat-mcp-server:latest \
+  -v /path/to/project/credentials.json:/app/credentials.json:ro \
+  -v /path/to/project:/data \
+  google-chat-mcp-server:latest \
   --auth web --host 0.0.0.0 --port 8000 --token-path=/data/token.json
 
-# CLI mode (for headless environments)
+# CLI mode
 docker run -it --rm \
-  -v /path/to/your/project:/data \
-  ghcr.io/chy168/google-chat-mcp-server:latest \
+  -v /path/to/project/credentials.json:/app/credentials.json:ro \
+  -v /path/to/project:/data \
+  google-chat-mcp-server:latest \
   --auth cli --token-path=/data/token.json
 ```
 
+## Development
 
-## Tools
-The MCP server provides the following tools:
-
-### Google Chat Tools
-- `get_chat_spaces()` - List all Google Chat spaces the bot has access to
-- `get_space_messages(space_name: str, start_date: str, end_date: str = None)` - List messages from a specific Google Chat space with optional time filtering
-
-
-## Development and Debug
-
-### Build Image
 ```bash
-docker build -t google-chat-mcp-server:latest .
-# or
-podman build -t google-chat-mcp-server:latest .
-```
+# Run MCP server directly
+uv run server.py
 
-### Debug
-```
+# Debug with FastMCP inspector
 fastmcp dev server.py --with-editable .
+
+# Raw API output (no field filtering)
+uv run server.py --raw-messages
 ```
 
+## Architecture
+
+```
+server.py          — FastMCP entry point, registers all MCP tools
+google_chat.py     — Google Chat API + People API client, credential management
+server_auth.py     — FastAPI OAuth2 web auth server
+auth_cli.py        — Headless CLI OAuth flow
+```

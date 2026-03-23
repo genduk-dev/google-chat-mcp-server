@@ -32,3 +32,4 @@ Two runtime modes sharing a common Google Chat client:
 - MCP framework: `fastmcp`
 - Auth credentials stored in `credentials.json` (GCP OAuth client secrets, not committed) and `token.json` (runtime, path configurable via `--token-path`)
 - `APP_MESSAGE_PREFIX` env var controls the prefix for `clientAssignedMessageId` (default: `client-genduk-`), used to tag and identify app-sent messages
+- `--raw-messages` flag disables field filtering (returns full API responses); filtered by default to save tokens
