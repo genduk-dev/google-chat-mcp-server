@@ -22,6 +22,7 @@ SCOPES = [
 _user_display_name_cache: Dict[str, str] = {}
 DEFAULT_CALLBACK_URL = "http://localhost:8000/auth/callback"
 DEFAULT_TOKEN_PATH = 'token.json'
+APP_MESSAGE_PREFIX = os.environ.get('APP_MESSAGE_PREFIX', 'client-genduk-')
 
 # Store credentials info
 token_info = {
@@ -335,7 +336,7 @@ async def list_space_messages(space_name: str,
                 'name': msg.get('name'),
                 'sender': display_name,
                 'sender_type': sender.get('type', 'HUMAN'),
-                'sent_by_app': client_msg_id.startswith('client-genduk-') if client_msg_id else False,
+                'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
                 'createTime': msg.get('createTime'),
                 'text': msg.get('text'),
                 'thread': msg.get('thread')
@@ -369,8 +370,8 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
 
         body = {'text': text}
 
-        # Auto-assign client message ID with genduk prefix for app attribution
-        message_id = f"client-genduk-{uuid.uuid4().hex[:12]}"
+        # Auto-assign client message ID with app prefix for attribution
+        message_id = f"{APP_MESSAGE_PREFIX}{uuid.uuid4().hex[:12]}"
 
         kwargs = {
             'parent': space_name,
@@ -449,7 +450,7 @@ async def get_message(message_name: str) -> Dict:
             'name': msg.get('name'),
             'sender': display_name,
             'sender_type': sender.get('type', 'HUMAN'),
-            'sent_by_app': client_msg_id.startswith('client-genduk-') if client_msg_id else False,
+            'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
             'createTime': msg.get('createTime'),
             'text': msg.get('text'),
             'thread': msg.get('thread'),
