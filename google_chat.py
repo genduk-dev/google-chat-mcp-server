@@ -709,7 +709,7 @@ async def send_message_with_attachment(
         raise Exception(f"Failed to send message with attachment: {str(e)}")
 
 
-async def download_attachment(resource_name: str, save_dir: str = '/tmp') -> Dict:
+async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: Optional[str] = None) -> Dict:
     """Download a file attachment from a Google Chat message.
 
     Uses the Chat API media endpoint with the attachment's resourceName
@@ -718,9 +718,11 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp') -> Dic
     Args:
         resource_name: The resourceName from attachmentDataRef (base64 string)
         save_dir: Directory to save the downloaded file (default: /tmp)
+        content_name: Original filename from attachment metadata (e.g. 'image.png').
+                     Used as fallback for file extension when API returns generic content type.
 
     Returns:
-        Dict with path, contentType, and size
+        Dict with path, contentName, contentType, and size
     """
     try:
         creds = get_credentials()
@@ -737,13 +739,17 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp') -> Dic
         content_type = resp.headers.get('Content-Type', 'application/octet-stream')
         data = resp.read()
 
-        # Determine file extension from content type
+        # Determine file extension: prefer content type, fallback to content_name
         ext_map = {
             'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif',
             'image/webp': '.webp', 'application/pdf': '.pdf',
             'text/plain': '.txt', 'application/json': '.json',
         }
-        ext = ext_map.get(content_type, '.bin')
+        ext = ext_map.get(content_type)
+        if not ext and content_name:
+            _, ext = os.path.splitext(content_name)
+        if not ext:
+            ext = '.bin'
         filename = f"gchat-{uuid.uuid4().hex[:8]}{ext}"
         filepath = os.path.join(save_dir, filename)
 
@@ -753,6 +759,7 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp') -> Dic
 
         return {
             'path': filepath,
+            'contentName': content_name or filename,
             'contentType': content_type,
             'size': len(data),
         }
