@@ -87,7 +87,7 @@ async def get_space_members(space_name: str) -> List[Dict]:
     return await list_space_members(space_name)
 
 @mcp.tool()
-async def send_space_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None) -> Dict:
+async def send_space_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None) -> Dict:
     """Send a message to a Google Chat space.
 
     To mention a user, use the syntax <users/USER_ID> in the text.
@@ -99,12 +99,13 @@ async def send_space_message(space_name: str, text: str, thread_key: str = None,
         text: The message text to send (supports <users/USER_ID> mentions)
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
+        quote_reply_message_name: Optional message resource name to quote-reply to (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
 
     Returns:
         The created message object with name, createTime, text, thread, and space
     """
     from google_chat import send_space_message as _send
-    return await _send(space_name, text, thread_key, thread_name)
+    return await _send(space_name, text, thread_key, thread_name, quote_reply_message_name)
 
 @mcp.tool()
 async def delete_space_message(message_name: str) -> Dict:

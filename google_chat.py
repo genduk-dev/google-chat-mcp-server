@@ -442,6 +442,8 @@ async def list_space_messages(space_name: str,
                 'text': msg.get('text'),
                 'thread': msg.get('thread')
             }
+            if msg.get('quotedMessageMetadata'):
+                filtered_msg['quotedMessageMetadata'] = msg['quotedMessageMetadata']
             filtered_messages.append(filtered_msg)
 
         return filtered_messages
@@ -450,7 +452,7 @@ async def list_space_messages(space_name: str,
         raise Exception(f"Failed to list messages in space: {str(e)}")
 
 
-async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None, thread_name: Optional[str] = None) -> Dict:
+async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None, thread_name: Optional[str] = None, quote_reply_message_name: Optional[str] = None) -> Dict:
     """Send a message to a Google Chat space.
 
     Args:
@@ -458,6 +460,7 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         text: The message text to send
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
+        quote_reply_message_name: Optional message resource name to quote-reply to (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
 
     Returns:
         The created message object
@@ -470,6 +473,8 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         service = _get_service('chat', 'v1', creds)
 
         body = {'text': text}
+        if quote_reply_message_name:
+            body['quotedMessageMetadata'] = {'name': quote_reply_message_name, 'quoteType': 'REPLY'}
         kwargs = _build_send_kwargs(space_name, body, thread_key, thread_name)
 
         result = service.spaces().messages().create(**kwargs).execute()
@@ -525,7 +530,7 @@ async def get_message(message_name: str) -> Dict:
         display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
 
         client_msg_id = msg.get('clientAssignedMessageId', '')
-        return {
+        result = {
             'name': msg.get('name'),
             'sender': display_name,
             'sender_type': sender.get('type', 'HUMAN'),
@@ -535,6 +540,9 @@ async def get_message(message_name: str) -> Dict:
             'text': msg.get('text'),
             'thread': msg.get('thread'),
         }
+        if msg.get('quotedMessageMetadata'):
+            result['quotedMessageMetadata'] = msg['quotedMessageMetadata']
+        return result
     except Exception as e:
         raise Exception(f"Failed to get message: {str(e)}")
 
