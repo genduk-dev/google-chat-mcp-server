@@ -2,6 +2,8 @@ import os
 import logging
 import datetime
 import uuid
+import urllib.parse
+import urllib.request
 from typing import List, Dict, Optional, Tuple
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -444,6 +446,15 @@ async def list_space_messages(space_name: str,
             }
             if msg.get('quotedMessageMetadata'):
                 filtered_msg['quotedMessageMetadata'] = msg['quotedMessageMetadata']
+            filtered_msg['threadReply'] = msg.get('threadReply', False)
+            if msg.get('attachment'):
+                filtered_msg['attachment'] = [
+                    {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
+                     'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
+                    for a in msg['attachment']
+                ]
+            if msg.get('emojiReactionSummaries'):
+                filtered_msg['emojiReactionSummaries'] = msg['emojiReactionSummaries']
             filtered_messages.append(filtered_msg)
 
         return filtered_messages
@@ -542,6 +553,15 @@ async def get_message(message_name: str) -> Dict:
         }
         if msg.get('quotedMessageMetadata'):
             result['quotedMessageMetadata'] = msg['quotedMessageMetadata']
+        result['threadReply'] = msg.get('threadReply', False)
+        if msg.get('attachment'):
+            result['attachment'] = [
+                {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
+                 'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
+                for a in msg['attachment']
+            ]
+        if msg.get('emojiReactionSummaries'):
+            result['emojiReactionSummaries'] = msg['emojiReactionSummaries']
         return result
     except Exception as e:
         raise Exception(f"Failed to get message: {str(e)}")
@@ -687,4 +707,55 @@ async def send_message_with_attachment(
         return _format_sent_message(result)
     except Exception as e:
         raise Exception(f"Failed to send message with attachment: {str(e)}")
+
+
+async def download_attachment(resource_name: str, save_dir: str = '/tmp') -> Dict:
+    """Download a file attachment from a Google Chat message.
+
+    Uses the Chat API media endpoint with the attachment's resourceName
+    (base64-encoded, from attachmentDataRef).
+
+    Args:
+        resource_name: The resourceName from attachmentDataRef (base64 string)
+        save_dir: Directory to save the downloaded file (default: /tmp)
+
+    Returns:
+        Dict with path, contentType, and size
+    """
+    try:
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No valid credentials found. Please authenticate first.")
+
+        token = creds.token
+        encoded_name = urllib.parse.quote(resource_name, safe='')
+        url = f"https://chat.googleapis.com/v1/media/{encoded_name}?alt=media"
+
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        resp = urllib.request.urlopen(req)
+
+        content_type = resp.headers.get('Content-Type', 'application/octet-stream')
+        data = resp.read()
+
+        # Determine file extension from content type
+        ext_map = {
+            'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif',
+            'image/webp': '.webp', 'application/pdf': '.pdf',
+            'text/plain': '.txt', 'application/json': '.json',
+        }
+        ext = ext_map.get(content_type, '.bin')
+        filename = f"gchat-{uuid.uuid4().hex[:8]}{ext}"
+        filepath = os.path.join(save_dir, filename)
+
+        os.makedirs(save_dir, exist_ok=True)
+        with open(filepath, 'wb') as f:
+            f.write(data)
+
+        return {
+            'path': filepath,
+            'contentType': content_type,
+            'size': len(data),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to download attachment: {str(e)}")
 

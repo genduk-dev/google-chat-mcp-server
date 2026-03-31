@@ -216,6 +216,24 @@ async def send_message_with_attachment(
     from google_chat import send_message_with_attachment as _send_with_attachment
     return await _send_with_attachment(space_name, text, file_url, filename, thread_key, thread_name)
 
+@mcp.tool()
+async def download_attachment(resource_name: str, save_dir: str = '/tmp') -> Dict:
+    """Download a file attachment from a Google Chat message.
+
+    Use this after get_message or get_space_messages returns a message with
+    an 'attachment' field. Pass the resourceName from the attachment metadata.
+
+    Args:
+        resource_name: The resourceName string from the attachment's metadata
+                      (base64-encoded, from attachmentDataRef)
+        save_dir: Directory to save the file (default: /tmp)
+
+    Returns:
+        Dict with path (saved file location), contentType, and size in bytes
+    """
+    from google_chat import download_attachment as _download
+    return await _download(resource_name, save_dir)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MCP Server with Google Chat Authentication')
     parser.add_argument('--auth', choices=['web', 'cli'],
