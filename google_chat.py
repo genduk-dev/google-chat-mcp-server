@@ -66,7 +66,7 @@ def _format_sent_message(result: Dict) -> Dict:
 MAX_MESSAGES = 1000
 DEFAULT_CALLBACK_URL = "http://localhost:8000/auth/callback"
 DEFAULT_TOKEN_PATH = 'token.json'
-APP_MESSAGE_PREFIX = os.environ.get('APP_MESSAGE_PREFIX', 'client-genduk-')
+APP_MESSAGE_PREFIX = os.environ.get('APP_MESSAGE_PREFIX', 'client-gchat-mcp-')
 
 # Store credentials info
 token_info = {
