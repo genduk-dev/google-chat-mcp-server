@@ -463,8 +463,8 @@ async def list_space_messages(space_name: str,
         raise Exception(f"Failed to list messages in space: {str(e)}")
 
 
-async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None, thread_name: Optional[str] = None, quote_reply_message_name: Optional[str] = None) -> Dict:
-    """Send a message to a Google Chat space.
+async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None, thread_name: Optional[str] = None, quote_reply_message_name: Optional[str] = None, file_paths: Optional[List[str]] = None, filenames: Optional[List[str]] = None) -> Dict:
+    """Send a message to a Google Chat space, optionally with file attachments.
 
     Args:
         space_name: The space to send to (format: 'spaces/SPACE_ID')
@@ -472,10 +472,16 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
         quote_reply_message_name: Optional message resource name to quote-reply to (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+        file_paths: Optional list of local file paths or HTTP(S) URLs to upload as attachments
+        filenames: Optional list of display names for the attachments (matched by index to file_paths)
 
     Returns:
         The created message object
     """
+    import mimetypes
+    import tempfile
+    from googleapiclient.http import MediaFileUpload
+
     try:
         creds = get_credentials()
         if not creds:
@@ -486,11 +492,64 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         body = {'text': text}
         if quote_reply_message_name:
             body['quotedMessageMetadata'] = {'name': quote_reply_message_name, 'quoteType': 'REPLY'}
-        kwargs = _build_send_kwargs(space_name, body, thread_key, thread_name)
 
+        # Upload attachments if provided
+        temp_files = []
+        if file_paths:
+            attachments = []
+            for i, fp in enumerate(file_paths):
+                local_path = fp
+                temp_file = None
+                if fp.startswith('http://') or fp.startswith('https://'):
+                    url_path = urllib.parse.urlparse(fp).path
+                    ext = os.path.splitext(url_path)[1] or '.bin'
+                    temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                    temp_file.close()
+                    local_path = temp_file.name
+                    temp_files.append(local_path)
+                    urllib.request.urlretrieve(fp, local_path)
+
+                if not os.path.exists(local_path):
+                    raise Exception(f"File not found: {local_path}")
+
+                fname = (filenames[i] if filenames and i < len(filenames) else None) or os.path.basename(local_path)
+                mime_type, _ = mimetypes.guess_type(local_path)
+                if not mime_type:
+                    mime_type = 'application/octet-stream'
+
+                media = MediaFileUpload(local_path, mimetype=mime_type)
+                upload_result = service.media().upload(
+                    parent=space_name,
+                    body={'filename': fname},
+                    media_body=media
+                ).execute()
+                upload_token = upload_result['attachmentDataRef']['attachmentUploadToken']
+
+                attachments.append({
+                    'contentName': fname,
+                    'contentType': mime_type,
+                    'attachmentDataRef': {'attachmentUploadToken': upload_token}
+                })
+
+            body['attachment'] = attachments
+
+        kwargs = _build_send_kwargs(space_name, body, thread_key, thread_name)
         result = service.spaces().messages().create(**kwargs).execute()
+
+        # Clean up temp files
+        for tf in temp_files:
+            try:
+                os.unlink(tf)
+            except OSError:
+                pass
+
         return _format_sent_message(result)
     except Exception as e:
+        for tf in temp_files if 'temp_files' in dir() else []:
+            try:
+                os.unlink(tf)
+            except OSError:
+                pass
         raise Exception(f"Failed to send message: {str(e)}")
 
 
@@ -567,28 +626,93 @@ async def get_message(message_name: str) -> Dict:
         raise Exception(f"Failed to get message: {str(e)}")
 
 
-async def update_message(message_name: str, text: str) -> Dict:
-    """Edit the text of an existing message.
+async def update_message(message_name: str, text: str = None, file_paths: Optional[List[str]] = None, filenames: Optional[List[str]] = None) -> Dict:
+    """Edit an existing message — update text, add/replace attachments, or both.
 
     Args:
         message_name: The resource name of the message to update
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
-        text: The new text content for the message
+        text: New text content for the message. If None, text is not changed.
+        file_paths: List of local file paths or HTTP(S) URLs to upload as attachments.
+                   If provided, replaces any existing attachments. If None, attachments are not changed.
+        filenames: List of display names for the attachments (matched by index to file_paths).
 
     Returns:
-        The updated message object with name, createTime, text, and thread
+        The updated message object with name, createTime, lastUpdateTime, text, and thread
     """
+    import mimetypes
+    import tempfile
+    from googleapiclient.http import MediaFileUpload
+
+    temp_files = []
     try:
         creds = get_credentials()
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
         service = _get_service('chat', 'v1', creds)
+
+        update_fields = []
+        body = {}
+
+        if text is not None:
+            update_fields.append('text')
+            body['text'] = text
+
+        if file_paths is not None:
+            space_name = '/'.join(message_name.split('/')[:2])
+            attachments = []
+
+            for i, fp in enumerate(file_paths):
+                local_path = fp
+                if fp.startswith('http://') or fp.startswith('https://'):
+                    url_path = urllib.parse.urlparse(fp).path
+                    ext = os.path.splitext(url_path)[1] or '.bin'
+                    temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                    temp_file.close()
+                    local_path = temp_file.name
+                    temp_files.append(local_path)
+                    urllib.request.urlretrieve(fp, local_path)
+
+                if not os.path.exists(local_path):
+                    raise Exception(f"File not found: {local_path}")
+
+                fname = (filenames[i] if filenames and i < len(filenames) else None) or os.path.basename(local_path)
+                mime_type, _ = mimetypes.guess_type(local_path)
+                if not mime_type:
+                    mime_type = 'application/octet-stream'
+
+                media = MediaFileUpload(local_path, mimetype=mime_type)
+                upload_result = service.media().upload(
+                    parent=space_name,
+                    body={'filename': fname},
+                    media_body=media
+                ).execute()
+                upload_token = upload_result['attachmentDataRef']['attachmentUploadToken']
+
+                attachments.append({
+                    'contentName': fname,
+                    'contentType': mime_type,
+                    'attachmentDataRef': {'attachmentUploadToken': upload_token}
+                })
+
+            update_fields.append('attachment')
+            body['attachment'] = attachments
+
+        if not update_fields:
+            raise Exception("At least one of 'text' or 'file_paths' must be provided")
+
         result = service.spaces().messages().patch(
             name=message_name,
-            updateMask='text',
-            body={'text': text},
+            updateMask=','.join(update_fields),
+            body=body,
         ).execute()
+
+        for tf in temp_files:
+            try:
+                os.unlink(tf)
+            except OSError:
+                pass
 
         return {
             'name': result.get('name'),
@@ -598,6 +722,11 @@ async def update_message(message_name: str, text: str) -> Dict:
             'thread': result.get('thread'),
         }
     except Exception as e:
+        for tf in temp_files:
+            try:
+                os.unlink(tf)
+            except OSError:
+                pass
         raise Exception(f"Failed to update message: {str(e)}")
 
 
@@ -659,54 +788,6 @@ async def list_reactions(message_name: str) -> List[Dict]:
         return all_reactions
     except Exception as e:
         raise Exception(f"Failed to list reactions: {str(e)}")
-
-
-async def send_message_with_attachment(
-    space_name: str,
-    text: str,
-    file_url: str,
-    filename: Optional[str] = None,
-    thread_key: Optional[str] = None,
-    thread_name: Optional[str] = None,
-) -> Dict:
-    """Send a message with a file link to a Google Chat space.
-
-    NOTE: This is a simplified attachment implementation. The Google Chat API's
-    media.upload endpoint for user OAuth has significant restrictions (requires
-    service account or specific app configuration). This function sends a message
-    where the file is referenced as a clickable link embedded in the message text.
-    For true file uploads, use a service account with the Chat API media.upload
-    endpoint or share the file via Google Drive first.
-
-    Args:
-        space_name: The space to send to (format: 'spaces/SPACE_ID')
-        text: The message text to accompany the file link
-        file_url: The URL of the file to link (e.g. a Google Drive share link or public URL)
-        filename: Optional display name for the file link. Defaults to the URL if not provided.
-        thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
-        thread_name: Optional thread name to reply in an existing thread
-                    (format: 'spaces/SPACE_ID/threads/THREAD_ID')
-
-    Returns:
-        The created message object with name, createTime, text, thread, and space
-    """
-    try:
-        creds = get_credentials()
-        if not creds:
-            raise Exception("No valid credentials found. Please authenticate first.")
-
-        service = _get_service('chat', 'v1', creds)
-
-        link_label = filename or file_url
-        full_text = f"{text}\n📎 {link_label}: {file_url}" if text else f"📎 {link_label}: {file_url}"
-
-        body = {'text': full_text}
-        kwargs = _build_send_kwargs(space_name, body, thread_key, thread_name)
-
-        result = service.spaces().messages().create(**kwargs).execute()
-        return _format_sent_message(result)
-    except Exception as e:
-        raise Exception(f"Failed to send message with attachment: {str(e)}")
 
 
 async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: Optional[str] = None) -> Dict:

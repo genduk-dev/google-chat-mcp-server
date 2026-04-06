@@ -87,8 +87,8 @@ async def get_space_members(space_name: str) -> List[Dict]:
     return await list_space_members(space_name)
 
 @mcp.tool()
-async def send_space_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None) -> Dict:
-    """Send a message to a Google Chat space.
+async def send_space_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> Dict:
+    """Send a message to a Google Chat space, optionally with file attachments.
 
     To mention a user, use the syntax <users/USER_ID> in the text.
     Use get_space_members() to look up user IDs.
@@ -100,12 +100,14 @@ async def send_space_message(space_name: str, text: str, thread_key: str = None,
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
         quote_reply_message_name: Optional message resource name to quote-reply to (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
+        file_paths: Optional list of local file paths or HTTP(S) URLs to upload as attachments
+        filenames: Optional list of display names for the attachments (matched by index to file_paths)
 
     Returns:
         The created message object with name, createTime, text, thread, and space
     """
     from google_chat import send_space_message as _send
-    return await _send(space_name, text, thread_key, thread_name, quote_reply_message_name)
+    return await _send(space_name, text, thread_key, thread_name, quote_reply_message_name, file_paths, filenames)
 
 @mcp.tool()
 async def delete_space_message(message_name: str) -> Dict:
@@ -138,21 +140,24 @@ async def get_message(message_name: str) -> Dict:
     return await _get_message(message_name)
 
 @mcp.tool()
-async def update_message(message_name: str, text: str) -> Dict:
-    """Edit the text of an existing message in a Google Chat space.
+async def update_message(message_name: str, text: str = None, file_paths: list = None, filenames: list = None) -> Dict:
+    """Edit an existing message in a Google Chat space — update text, add/replace attachments, or both.
 
     Only messages sent by the authenticated user can be edited.
 
     Args:
         message_name: The resource name of the message to update
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
-        text: The new text content for the message
+        text: New text content for the message. If not provided, text is not changed.
+        file_paths: List of local file paths or HTTP(S) URLs to upload as attachments.
+                   If provided, replaces any existing attachments. If not provided, attachments are not changed.
+        filenames: List of display names for the attachments (matched by index to file_paths).
 
     Returns:
         The updated message object with name, createTime, lastUpdateTime, text, and thread
     """
     from google_chat import update_message as _update_message
-    return await _update_message(message_name, text)
+    return await _update_message(message_name, text, file_paths, filenames)
 
 @mcp.tool()
 async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
@@ -182,39 +187,6 @@ async def list_reactions(message_name: str) -> List[Dict]:
     """
     from google_chat import list_reactions as _list_reactions
     return await _list_reactions(message_name)
-
-@mcp.tool()
-async def send_message_with_attachment(
-    space_name: str,
-    text: str,
-    file_url: str,
-    filename: str = None,
-    thread_key: str = None,
-    thread_name: str = None,
-) -> Dict:
-    """Send a message with a file link to a Google Chat space.
-
-    Simplified attachment implementation — embeds the file as a clickable link
-    in the message text. For true binary file uploads, a service account with
-    media.upload access is required; this version works with any OAuth credentials.
-
-    To mention a user, use the syntax <users/USER_ID> in the text.
-    Use get_space_members() to look up user IDs.
-
-    Args:
-        space_name: The space to send to (format: 'spaces/SPACE_ID')
-        text: The message text to accompany the file link (supports <users/USER_ID> mentions)
-        file_url: The URL of the file to link (e.g. a Google Drive share link or public URL)
-        filename: Optional display name for the file link. Defaults to the URL if not provided.
-        thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
-        thread_name: Optional thread name to reply in an existing thread
-                    (format: 'spaces/SPACE_ID/threads/THREAD_ID')
-
-    Returns:
-        The created message object with name, createTime, text, thread, and space
-    """
-    from google_chat import send_message_with_attachment as _send_with_attachment
-    return await _send_with_attachment(space_name, text, file_url, filename, thread_key, thread_name)
 
 @mcp.tool()
 async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: str = None) -> Dict:
