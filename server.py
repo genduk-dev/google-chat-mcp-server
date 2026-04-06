@@ -11,9 +11,9 @@ from auth_cli import run_cli_auth
 mcp = FastMCP("Google Chat")
 
 @mcp.tool()
-async def get_chat_spaces() -> List[Dict]:
+async def get_spaces() -> List[Dict]:
     """List all Google Chat spaces the bot has access to.
-    
+
     This tool requires OAuth authentication. On first run, it will open a browser window
     for you to log in with your Google account. Make sure you have credentials.json
     downloaded from Google Cloud Console in the current directory.
@@ -21,26 +21,26 @@ async def get_chat_spaces() -> List[Dict]:
     return await list_chat_spaces()
 
 @mcp.tool()
-async def get_space_messages(space_name: str, 
-                           start_date: str,
-                           end_date: str = None) -> List[Dict]:
+async def get_messages(space_name: str,
+                       start_date: str,
+                       end_date: str = None) -> List[Dict]:
     """List messages from a specific Google Chat space with optional time filtering.
-    
+
     This tool requires OAuth authentication. The space_name should be in the format
     'spaces/your_space_id'. Dates should be in YYYY-MM-DD format (e.g., '2024-03-22').
-    
+
     When only start_date is provided, it will query messages for that entire day.
     When both dates are provided, it will query messages from start_date 00:00:00Z
     to end_date 23:59:59Z.
-    
+
     Args:
         space_name: The name/identifier of the space to fetch messages from
         start_date: Required start date in YYYY-MM-DD format
         end_date: Optional end date in YYYY-MM-DD format
-    
+
     Returns:
         List of message objects from the space matching the time criteria
-        
+
     Raises:
         ValueError: If the date format is invalid or dates are in wrong order
     """
@@ -52,14 +52,14 @@ async def get_space_messages(space_name: str,
         start_datetime = datetime.strptime(start_date, '%Y-%m-%d').replace(
             hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
         )
-        
+
         # Parse end date if provided and set to end of day (23:59:59Z)
         end_datetime = None
         if end_date:
             end_datetime = datetime.strptime(end_date, '%Y-%m-%d').replace(
                 hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc
             )
-            
+
             # Validate date range
             if start_datetime > end_datetime:
                 raise ValueError("start_date must be before end_date")
@@ -67,11 +67,11 @@ async def get_space_messages(space_name: str,
         if "strptime" in str(e):
             raise ValueError("Dates must be in YYYY-MM-DD format (e.g., '2024-03-22')")
         raise e
-    
+
     return await list_space_messages(space_name, start_datetime, end_datetime)
 
 @mcp.tool()
-async def get_space_members(space_name: str) -> List[Dict]:
+async def get_members(space_name: str) -> List[Dict]:
     """List all members of a Google Chat space with their user IDs and display names.
 
     Use this to look up user IDs for mentioning people in messages.
@@ -87,11 +87,11 @@ async def get_space_members(space_name: str) -> List[Dict]:
     return await list_space_members(space_name)
 
 @mcp.tool()
-async def send_space_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> Dict:
+async def send_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> Dict:
     """Send a message to a Google Chat space, optionally with file attachments.
 
     To mention a user, use the syntax <users/USER_ID> in the text.
-    Use get_space_members() to look up user IDs.
+    Use get_members() to look up user IDs.
     To mention everyone, use <users/all>.
 
     Args:
@@ -110,7 +110,7 @@ async def send_space_message(space_name: str, text: str, thread_key: str = None,
     return await _send(space_name, text, thread_key, thread_name, quote_reply_message_name, file_paths, filenames)
 
 @mcp.tool()
-async def delete_space_message(message_name: str) -> Dict:
+async def delete_message(message_name: str) -> Dict:
     """Delete a message from a Google Chat space.
 
     Only messages sent by the authenticated bot/user can be deleted.
@@ -192,7 +192,7 @@ async def list_reactions(message_name: str) -> List[Dict]:
 async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: str = None) -> Dict:
     """Download a file attachment from a Google Chat message.
 
-    Use this after get_message or get_space_messages returns a message with
+    Use this after get_message or get_messages returns a message with
     an 'attachment' field. Pass the resourceName and contentName from the attachment metadata.
 
     Args:
