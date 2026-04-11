@@ -140,7 +140,7 @@ async def get_message(message_name: str) -> Dict:
     return await _get_message(message_name)
 
 @mcp.tool()
-async def update_message(message_name: str, text: str = None, file_paths: list = None, filenames: list = None) -> Dict:
+async def update_message(message_name: str, text: str = None, file_paths: list = None, filenames: list = None, remove_quote_reply: bool = False) -> Dict:
     """Edit an existing message in a Google Chat space — update text, add/replace attachments, or both.
 
     Only messages sent by the authenticated user can be edited.
@@ -152,12 +152,14 @@ async def update_message(message_name: str, text: str = None, file_paths: list =
         file_paths: List of local file paths or HTTP(S) URLs to upload as attachments.
                    If provided, replaces any existing attachments. If not provided, attachments are not changed.
         filenames: List of display names for the attachments (matched by index to file_paths).
+        remove_quote_reply: If True, removes the quoted message from this message.
+                           Note: quote replies can only be removed, not added via edit.
 
     Returns:
         The updated message object with name, createTime, lastUpdateTime, text, and thread
     """
     from google_chat import update_message as _update_message
-    return await _update_message(message_name, text, file_paths, filenames)
+    return await _update_message(message_name, text, file_paths, filenames, remove_quote_reply)
 
 @mcp.tool()
 async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:

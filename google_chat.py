@@ -635,7 +635,7 @@ async def get_message(message_name: str) -> Dict:
         raise Exception(f"Failed to get message: {str(e)}")
 
 
-async def update_message(message_name: str, text: str = None, file_paths: Optional[List[str]] = None, filenames: Optional[List[str]] = None) -> Dict:
+async def update_message(message_name: str, text: str = None, file_paths: Optional[List[str]] = None, filenames: Optional[List[str]] = None, remove_quote_reply: bool = False) -> Dict:
     """Edit an existing message — update text, add/replace attachments, or both.
 
     Args:
@@ -645,6 +645,8 @@ async def update_message(message_name: str, text: str = None, file_paths: Option
         file_paths: List of local file paths or HTTP(S) URLs to upload as attachments.
                    If provided, replaces any existing attachments. If None, attachments are not changed.
         filenames: List of display names for the attachments (matched by index to file_paths).
+        remove_quote_reply: If True, removes the quoted message from this message.
+                           Note: quote replies can only be removed, not added via edit.
 
     Returns:
         The updated message object with name, createTime, lastUpdateTime, text, and thread
@@ -667,6 +669,9 @@ async def update_message(message_name: str, text: str = None, file_paths: Option
         if text is not None:
             update_fields.append('text')
             body['text'] = text
+
+        if remove_quote_reply:
+            update_fields.append('quotedMessageMetadata')
 
         if file_paths is not None:
             space_name = '/'.join(message_name.split('/')[:2])
