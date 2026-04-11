@@ -491,7 +491,16 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
 
         body = {'text': text}
         if quote_reply_message_name:
-            body['quotedMessageMetadata'] = {'name': quote_reply_message_name, 'quoteType': 'REPLY'}
+            # Fetch the quoted message to get lastUpdateTime (required by API)
+            try:
+                quoted_msg = service.spaces().messages().get(name=quote_reply_message_name).execute()
+                last_update = quoted_msg.get('lastUpdateTime') or quoted_msg.get('createTime')
+            except Exception:
+                last_update = None
+            metadata = {'name': quote_reply_message_name}
+            if last_update:
+                metadata['lastUpdateTime'] = last_update
+            body['quotedMessageMetadata'] = metadata
 
         # Upload attachments if provided
         temp_files = []
