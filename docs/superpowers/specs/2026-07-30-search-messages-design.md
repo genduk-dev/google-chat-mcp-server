@@ -126,7 +126,9 @@ which the other tools omit because they are single-space by construction. A cros
 result set is meaningless without it; `space` is taken from the result's `space.name`
 (falling back to parsing the `spaces/X/messages/Y` prefix of `name`).
 
-When `FILTER_MESSAGES` is False, return the raw API result objects unchanged.
+When `FILTER_MESSAGES` is False, still unwrap each `results[i].message` — return the
+raw, unfiltered message objects, not the raw `{"results": [{"message": {...}}]}`
+API response shape.
 
 ### Sender display names
 
@@ -187,3 +189,90 @@ messages"). Concretely:
 - `orderBy` / `view` parameters. Defaults are fine; add them when someone needs them.
 - Searching by sender, date range, or attachment presence via filter syntax — the
   `query` string is passed through, so a caller who knows the syntax can already use it.
+
+## Probe results (2026-07-30)
+
+Live probe against `spaces.messages.search` (`chat.googleapis.com/v1/{parent}/messages:search`),
+run from `/tmp/probe_search.py` (throwaway, not committed) with `QUERY = "kaam"` and
+`SPACE = "spaces/AAQAuEymweE"` (a real space with a matching message).
+
+1. `RESULT_KEY` = **`results`** (not `messages`). Each entry is `{"message": {...}}` — the
+   actual message object is nested one level under `results[i].message`, not `results[i]`
+   itself. `nextPageToken` was present at the top level.
+2. `FILTER_FORM` = **`bare`**. `{"filter": "kaam"}` against `spaces/-` returned HTTP 200
+   with 1 matching result. `{"filter": "text: \"kaam\""}` returned HTTP 400
+   `INVALID_ARGUMENT: Invalid filter query: text: "kaam"` — the field-qualified form is
+   rejected outright.
+3. `PARENT_SCOPING` = **`dash-only`**. `parent="spaces/AAQAuEymweE"` with a bare filter
+   returned HTTP 400: `Invalid parent. Specify 'spaces/-' to search across all spaces the
+   user has access to. To limit the search to one or more spaces, use the 'space.name' or
+   'space.display_name' in the 'filter' field.`
+
+space_name scoping falls back to `parent=spaces/-` with `AND space.name = "<space_name>"` appended to the filter.
+
+Raw probe output:
+
+```
+[bare-filter/dash] HTTP 200 keys=['results', 'nextPageToken'] count=1 nextPageToken=True
+{
+  "results": [
+    {
+      "message": {
+        "name": "spaces/AAQAuEymweE/messages/u6mTJSSdfkw.u6mTJSSdfkw",
+        "sender": {
+          "name": "users/118395191287357300733",
+          "type": "HUMAN"
+        },
+        "createTime": "2025-09-22T08:23:30.342815Z",
+        "text": "kaam set heee",
+        "thread": {
+          "name": "spaces/AAQAuEymweE/threads/u6mTJSSdfkw"
+        },
+        "space": {
+          "name": "spaces/AAQAuEymweE"
+        },
+        "argumentText": "kaam set heee",
+        "formattedText": "kaam set heee"
+      }
+    }
+  ],
+  "nextPageToken": "TMKUjY9DRN6On_JVS7bZktNBY19N1ur_lkdC_o_jlEx4IVvGuPidQVTkiY-BSmxEbUwPQVlRTUDH7dDnQmyy7JeHqqjHLg=="
+}
+[qualified-filter/dash] HTTP 400: {
+  "error": {
+    "code": 400,
+    "message": "Invalid filter query: text: \"kaam\"",
+    "status": "INVALID_ARGUMENT",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.Help",
+        "links": [
+          {
+            "description": "For example search query filters, see the search messages method reference documentation.",
+            "url": "https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/search"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+[bare-filter/concrete] HTTP 400: {
+  "error": {
+    "code": 400,
+    "message": "Invalid parent. Specify 'spaces/-' to search across all spaces the user has access to. To limit the search to one or more spaces, use the 'space.name' or 'space.display_name' in the 'filter' field.",
+    "status": "INVALID_ARGUMENT",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.Help",
+        "links": [
+          {
+            "description": "For example search query filters, see the search messages method reference documentation.",
+            "url": "https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces.messages/search"
+          }
+        ]
+      }
+    ]
+  }
+}
+```

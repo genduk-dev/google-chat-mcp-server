@@ -20,7 +20,7 @@ No test suite exists yet (tests/ directory is empty).
 
 Two runtime modes sharing a common Google Chat client:
 
-1. **MCP Server** (`server.py`) — FastMCP instance registering tools: `get_chat_spaces`, `get_space_messages`, `send_space_message`, `delete_space_message`, `get_message`, `update_message`, `create_reaction`, `list_reactions`, `send_message_with_attachment`
+1. **MCP Server** (`server.py`) — FastMCP instance registering tools: `get_chat_spaces`, `get_space_messages`, `send_space_message`, `delete_space_message`, `get_message`, `search_messages`, `update_message`, `create_reaction`, `list_reactions`, `send_message_with_attachment`
 
 2. **Auth Server** (`server_auth.py`) — FastAPI OAuth2 web flow; also `auth_cli.py` for headless CLI auth
 

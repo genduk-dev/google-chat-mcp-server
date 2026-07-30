@@ -1,9 +1,12 @@
 import os
 import logging
 import datetime
+import json
+import re
 import uuid
 import urllib.parse
 import urllib.request
+import urllib.error
 from typing import List, Dict, Optional, Tuple
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -461,6 +464,159 @@ async def list_space_messages(space_name: str,
         
     except Exception as e:
         raise Exception(f"Failed to list messages in space: {str(e)}")
+
+
+def _chat_api_post(path: str, body: Dict, creds: Credentials) -> Dict:
+    """POST to a Chat API v1 endpoint that the discovery client does not expose.
+
+    Used for methods missing from google-api-python-client's discovery document
+    (currently spaces.messages.search, a Developer Preview method). Mirrors the
+    raw-HTTP pattern in download_attachment.
+
+    Args:
+        path: API path below /v1/, e.g. 'spaces/-/messages:search'
+        body: JSON request body
+        creds: Valid credentials (get_credentials() has already refreshed them)
+
+    Returns:
+        Parsed JSON response
+
+    Raises:
+        urllib.error.HTTPError: propagated unchanged so callers can inspect .code
+    """
+    url = f"https://chat.googleapis.com/v1/{path}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode('utf-8'),
+        headers={
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.load(resp)
+
+
+async def search_space_messages(query: str,
+                                space_name: Optional[str] = None,
+                                limit: int = 50,
+                                page_token: Optional[str] = None) -> Dict:
+    """Full-text search across Google Chat messages via spaces.messages.search.
+
+    query is passed through verbatim as the API's filter string — it is not escaped
+    or wrapped. The API rejects a literal `"` inside it and rejects a bare, standalone
+    `OR` token (the boolean operator) between terms — both are validated locally
+    before any request is made. Lowercase `or` and "or" inside a word (e.g. "order",
+    "sponsor") are ordinary text and are NOT rejected. space_name is also validated
+    locally for a literal `"`, since it is interpolated into the same filter string.
+
+    Args:
+        query: Free-text search string, passed through as the API filter
+        space_name: Optional 'spaces/XXXX' to scope the search; None searches
+                    every accessible space
+        limit: Max messages in this page of results (clamped to 1..MAX_MESSAGES)
+        page_token: Opaque continuation token from a previous call's nextPageToken
+
+    Returns:
+        {'messages': [...], 'nextPageToken': str or None}
+
+    Raises:
+        Exception: If authentication fails, preview access is unavailable, the
+                   API request fails, or query/space_name are invalid
+    """
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+
+    if not query or not query.strip():
+        raise Exception("Failed to search messages: query cannot be empty")
+    if '"' in query:
+        raise Exception(
+            'Failed to search messages: query cannot contain a literal " character '
+            "(it is interpolated unescaped into the API filter string, which rejects "
+            "unescaped quotes)"
+        )
+    if re.search(r'\bOR\b', query):
+        raise Exception(
+            "Failed to search messages: query cannot contain a standalone OR token "
+            "(the API treats bare OR as its boolean operator and rejects it; "
+            "lowercase 'or' or 'or' inside a word is fine)"
+        )
+    if space_name is not None and not (space_name.startswith("spaces/") and len(space_name) > len("spaces/")):
+        raise Exception(
+            f"Failed to search messages: space_name {space_name!r} must look like "
+            "'spaces/<id>'"
+        )
+    if space_name is not None and '"' in space_name:
+        raise Exception(
+            'Failed to search messages: space_name cannot contain a literal " character '
+            "(it is interpolated unescaped into the API filter string)"
+        )
+
+    limit = max(1, min(limit, MAX_MESSAGES))
+    parent = "spaces/-"
+    filter_str = query
+    if space_name:
+        filter_str = f'{filter_str} AND space.name = "{space_name}"'
+
+    results = []
+    next_token = page_token
+    try:
+        while len(results) < limit:
+            body = {
+                'filter': filter_str,
+                'pageSize': min(100, limit - len(results)),
+            }
+            if next_token:
+                body['pageToken'] = next_token
+
+            response = _chat_api_post(f"{parent}/messages:search", body, creds)
+            page_entries = [entry['message'] for entry in response.get('results', []) if 'message' in entry]
+            results.extend(page_entries)
+            next_token = response.get('nextPageToken')
+            if not next_token or not page_entries:
+                break
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode('utf-8', errors='replace')[:500]
+        if e.code in (403, 404):
+            raise Exception(
+                "Failed to search messages: the spaces.messages.search method is in "
+                "Google Workspace Developer Preview and this account/project appears "
+                f"to have lost access (HTTP {e.code}). Other tools are unaffected. "
+                f"API said: {detail}"
+            )
+        if e.code == 400:
+            raise Exception(
+                f"Failed to search messages: API rejected filter {filter_str!r} "
+                f"(HTTP 400). API said: {detail}"
+            )
+        raise Exception(f"Failed to search messages: HTTP {e.code} {detail}")
+    except Exception as e:
+        raise Exception(f"Failed to search messages: {str(e)}")
+
+    if not FILTER_MESSAGES:
+        return {'messages': results, 'nextPageToken': next_token}
+
+    filtered_messages = []
+    for msg in results:
+        sender = msg.get('sender', {})
+        display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
+        client_msg_id = msg.get('clientAssignedMessageId', '')
+        name = msg.get('name', '')
+        space = msg.get('space', {}).get('name') or '/'.join(name.split('/')[:2])
+        filtered_messages.append({
+            'name': name,
+            'space': space,
+            'sender': display_name,
+            'sender_type': sender.get('type', 'HUMAN'),
+            'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
+            'createTime': msg.get('createTime'),
+            'text': msg.get('text'),
+            'thread': msg.get('thread'),
+        })
+
+    return {'messages': filtered_messages, 'nextPageToken': next_token}
 
 
 async def send_space_message(space_name: str, text: str, thread_key: Optional[str] = None, thread_name: Optional[str] = None, quote_reply_message_name: Optional[str] = None, file_paths: Optional[List[str]] = None, filenames: Optional[List[str]] = None) -> Dict:
