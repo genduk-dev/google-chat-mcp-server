@@ -32,7 +32,8 @@ def _read_line_raw(prompt: str) -> str:
     """Read a line from the terminal without TTY line-discipline buffer limits.
 
     Switches to raw mode so pasted content of any length is captured correctly.
-    Falls back to sys.stdin.readline() when stdin is not a TTY (e.g. piped input).
+    Falls back to sys.stdin.readline() when stdin is not a TTY (e.g. piped input),
+    or when the POSIX raw-mode modules are unavailable (Windows).
     """
     import sys
     print(prompt, end='', flush=True)
@@ -40,8 +41,13 @@ def _read_line_raw(prompt: str) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.readline().strip()
 
-    import tty
-    import termios
+    try:
+        import tty
+        import termios
+    except ImportError:
+        # Windows has no termios; fall back to the buffered read. Long pastes
+        # may truncate there, but that beats failing to authenticate at all.
+        return sys.stdin.readline().strip()
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
