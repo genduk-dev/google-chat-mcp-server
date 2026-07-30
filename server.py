@@ -71,6 +71,40 @@ async def get_messages(space_name: str,
     return await list_space_messages(space_name, start_datetime, end_datetime)
 
 @mcp.tool()
+async def search_messages(query: str,
+                          space_name: str = None,
+                          limit: int = 50,
+                          page_token: str = None) -> Dict:
+    """Full-text search for Google Chat messages by content.
+
+    Searches every space you have access to by default, or a single space when
+    space_name is given. Use this to find a message or thread when you know
+    roughly what was said but not where or when — get_messages requires you to
+    already know the space and date.
+
+    Results come back one page at a time. If the page you get back is not enough,
+    call again with page_token set to the nextPageToken you received — that
+    continues where you left off instead of re-fetching what you already have.
+    Reuse the same query and space_name when continuing; the token is only valid
+    for that combination.
+
+    Args:
+        query: Text to search for
+        space_name: Optional 'spaces/XXXX' to restrict the search to one space
+        limit: Max messages in this page (default 50, capped at 1000)
+        page_token: nextPageToken from a previous call, to fetch the next page
+
+    Returns:
+        {'messages': [...], 'nextPageToken': str or None} — nextPageToken is None
+        when there are no further results
+
+    Raises:
+        Exception: If not authenticated, or if the search API is unavailable
+    """
+    from google_chat import search_space_messages
+    return await search_space_messages(query, space_name, limit, page_token)
+
+@mcp.tool()
 async def get_members(space_name: str) -> List[Dict]:
     """List all members of a Google Chat space with their user IDs and display names.
 
