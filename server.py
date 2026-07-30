@@ -88,8 +88,10 @@ async def search_messages(query: str,
     Reuse the same query and space_name when continuing; the token is only valid
     for that combination.
 
-    query is passed through verbatim as the API's filter string. A literal `"` in
-    query, or a bare `OR` between terms, is rejected by the API.
+    query is passed through verbatim as the API's filter string. A literal `"`, or
+    a standalone `OR` token, is rejected locally before any request is made.
+    Lowercase `or` and "or" inside a word (e.g. "order") are fine. space_name is
+    also rejected locally if it contains a literal `"`.
 
     Args:
         query: Text to search for

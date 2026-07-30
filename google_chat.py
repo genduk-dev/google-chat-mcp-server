@@ -2,6 +2,7 @@ import os
 import logging
 import datetime
 import json
+import re
 import uuid
 import urllib.parse
 import urllib.request
@@ -504,8 +505,11 @@ async def search_space_messages(query: str,
     """Full-text search across Google Chat messages via spaces.messages.search.
 
     query is passed through verbatim as the API's filter string — it is not escaped
-    or wrapped. The API rejects a literal `"` inside it and rejects a bare `OR`
-    between terms, so both are validated locally before any request is made.
+    or wrapped. The API rejects a literal `"` inside it and rejects a bare, standalone
+    `OR` token (the boolean operator) between terms — both are validated locally
+    before any request is made. Lowercase `or` and "or" inside a word (e.g. "order",
+    "sponsor") are ordinary text and are NOT rejected. space_name is also validated
+    locally for a literal `"`, since it is interpolated into the same filter string.
 
     Args:
         query: Free-text search string, passed through as the API filter
@@ -533,10 +537,21 @@ async def search_space_messages(query: str,
             "(it is interpolated unescaped into the API filter string, which rejects "
             "unescaped quotes)"
         )
+    if re.search(r'\bOR\b', query):
+        raise Exception(
+            "Failed to search messages: query cannot contain a standalone OR token "
+            "(the API treats bare OR as its boolean operator and rejects it; "
+            "lowercase 'or' or 'or' inside a word is fine)"
+        )
     if space_name is not None and not (space_name.startswith("spaces/") and len(space_name) > len("spaces/")):
         raise Exception(
             f"Failed to search messages: space_name {space_name!r} must look like "
             "'spaces/<id>'"
+        )
+    if space_name is not None and '"' in space_name:
+        raise Exception(
+            'Failed to search messages: space_name cannot contain a literal " character '
+            "(it is interpolated unescaped into the API filter string)"
         )
 
     limit = max(1, min(limit, MAX_MESSAGES))
