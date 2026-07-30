@@ -88,6 +88,9 @@ async def search_messages(query: str,
     Reuse the same query and space_name when continuing; the token is only valid
     for that combination.
 
+    query is passed through verbatim as the API's filter string. A literal `"` in
+    query, or a bare `OR` between terms, is rejected by the API.
+
     Args:
         query: Text to search for
         space_name: Optional 'spaces/XXXX' to restrict the search to one space

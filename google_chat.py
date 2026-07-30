@@ -503,6 +503,10 @@ async def search_space_messages(query: str,
                                 page_token: Optional[str] = None) -> Dict:
     """Full-text search across Google Chat messages via spaces.messages.search.
 
+    query is passed through verbatim as the API's filter string — it is not escaped
+    or wrapped. The API rejects a literal `"` inside it and rejects a bare `OR`
+    between terms, so both are validated locally before any request is made.
+
     Args:
         query: Free-text search string, passed through as the API filter
         space_name: Optional 'spaces/XXXX' to scope the search; None searches
@@ -514,12 +518,26 @@ async def search_space_messages(query: str,
         {'messages': [...], 'nextPageToken': str or None}
 
     Raises:
-        Exception: If authentication fails, preview access is unavailable, or the
-                   API request fails
+        Exception: If authentication fails, preview access is unavailable, the
+                   API request fails, or query/space_name are invalid
     """
     creds = get_credentials()
     if not creds:
         raise Exception("No valid credentials found. Please authenticate first.")
+
+    if not query or not query.strip():
+        raise Exception("Failed to search messages: query cannot be empty")
+    if '"' in query:
+        raise Exception(
+            'Failed to search messages: query cannot contain a literal " character '
+            "(it is interpolated unescaped into the API filter string, which rejects "
+            "unescaped quotes)"
+        )
+    if space_name is not None and not (space_name.startswith("spaces/") and len(space_name) > len("spaces/")):
+        raise Exception(
+            f"Failed to search messages: space_name {space_name!r} must look like "
+            "'spaces/<id>'"
+        )
 
     limit = max(1, min(limit, MAX_MESSAGES))
     parent = "spaces/-"
@@ -539,9 +557,10 @@ async def search_space_messages(query: str,
                 body['pageToken'] = next_token
 
             response = _chat_api_post(f"{parent}/messages:search", body, creds)
-            results.extend(entry.get('message', {}) for entry in response.get('results', []))
+            page_entries = [entry['message'] for entry in response.get('results', []) if 'message' in entry]
+            results.extend(page_entries)
             next_token = response.get('nextPageToken')
-            if not next_token:
+            if not next_token or not page_entries:
                 break
     except urllib.error.HTTPError as e:
         detail = e.read().decode('utf-8', errors='replace')[:500]

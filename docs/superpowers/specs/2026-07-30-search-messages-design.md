@@ -126,7 +126,9 @@ which the other tools omit because they are single-space by construction. A cros
 result set is meaningless without it; `space` is taken from the result's `space.name`
 (falling back to parsing the `spaces/X/messages/Y` prefix of `name`).
 
-When `FILTER_MESSAGES` is False, return the raw API result objects unchanged.
+When `FILTER_MESSAGES` is False, still unwrap each `results[i].message` — return the
+raw, unfiltered message objects, not the raw `{"results": [{"message": {...}}]}`
+API response shape.
 
 ### Sender display names
 
