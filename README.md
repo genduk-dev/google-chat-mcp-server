@@ -83,12 +83,18 @@ Both modes save the token to `token.json` (configurable via `--token-path`).
 | `get_space_members(space_name)` | List members with user IDs, display names, and mention syntax |
 | `get_space_messages(space_name, start_date, end_date?)` | List messages with date filtering (YYYY-MM-DD) |
 | `get_message(message_name)` | Fetch a single message by resource name |
+| `search_messages(query, space_name?, limit?, page_token?)` | Full-text search across all spaces (or one). Returns `{messages, nextPageToken}`; pass the token back to page forward |
 | `send_space_message(space_name, text, thread_key?, thread_name?)` | Send a message, optionally in a thread |
 | `update_message(message_name, text)` | Edit a message's text |
 | `delete_space_message(message_name)` | Delete a message |
 | `create_reaction(message_name, emoji_unicode)` | Add an emoji reaction |
 | `list_reactions(message_name)` | List all reactions on a message |
 | `send_message_with_attachment(space_name, text, file_url, ...)` | Send a message with a file link |
+
+> **Note:** `search_messages` uses the Chat API's `spaces.messages.search` endpoint,
+> which is in Google Workspace Developer Preview. It works with the existing
+> `chat.messages` scope and needs no re-auth, but Google may change or withdraw it.
+> If that happens the tool raises a clear error and every other tool keeps working.
 
 **Mentions:** To mention a user in message text, use `<users/USER_ID>`. Use `get_space_members()` to look up IDs. Use `<users/all>` to mention everyone.
 
