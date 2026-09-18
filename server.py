@@ -17,10 +17,11 @@ logger = logging.getLogger(__name__)
 def _json(result) -> str:
     """Tool output as compact JSON. FastMCP's own serialization escapes non-ASCII
     (emoji, CJK) as \\uXXXX, pads separators, and splits a list into one content
-    item per element, all of which cost tokens."""
+    item per element, all of which cost tokens. Tools set output_schema=None, or
+    FastMCP sends this text a second time as structuredContent."""
     return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_spaces(query: str = None, space_type: str = None, limit: int = 100) -> str:
     """List your Google Chat spaces, most recently active first.
 
@@ -37,7 +38,7 @@ async def get_spaces(query: str = None, space_type: str = None, limit: int = 100
     """
     return _json(await list_chat_spaces(query, space_type, limit))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_messages(space_name: str,
                        start_date: str = None,
                        end_date: str = None,
@@ -112,7 +113,7 @@ async def get_messages(space_name: str,
 
     return _json(await list_space_messages(space_name, start_datetime, end_datetime, thread_name, limit))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_unread_spaces(days: int = 1) -> str:
     """Find the spaces, DMs and group chats with messages you have not read yet.
 
@@ -129,7 +130,7 @@ async def list_unread_spaces(days: int = 1) -> str:
     from google_chat import list_unread_spaces as _list
     return _json(await _list(days))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_unread_messages(space_name: str, limit: int = 50) -> str:
     """Read the messages you have not read in one space: those created after your read marker.
 
@@ -147,7 +148,7 @@ async def get_unread_messages(space_name: str, limit: int = 50) -> str:
     from google_chat import get_unread_messages as _get
     return _json(await _get(space_name, limit))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def mark_space_read(space_name: str) -> str:
     """Mark everything in a space as read, as if you had opened it in Google Chat.
 
@@ -160,7 +161,7 @@ async def mark_space_read(space_name: str) -> str:
     from google_chat import mark_space_read as _mark
     return _json(await _mark(space_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def search_messages(query: str,
                           space_name: str = None,
                           limit: int = 50,
@@ -200,7 +201,7 @@ async def search_messages(query: str,
     from google_chat import search_space_messages
     return _json(await search_space_messages(query, space_name, limit, page_token))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_members(space_name: str) -> str:
     """List all members of a Google Chat space with their user IDs and display names.
 
@@ -216,7 +217,7 @@ async def get_members(space_name: str) -> str:
     from google_chat import list_space_members
     return _json(await list_space_members(space_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def send_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> str:
     """Send a message to a Google Chat space, optionally with file attachments.
 
@@ -247,7 +248,7 @@ async def send_message(space_name: str, text: str, thread_key: str = None, threa
     from google_chat import send_space_message as _send
     return _json(await _send(space_name, text, thread_key, thread_name, quote_reply_message_name, file_paths, filenames))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def delete_message(message_name: str) -> str:
     """Delete a message from a Google Chat space.
 
@@ -263,7 +264,7 @@ async def delete_message(message_name: str) -> str:
     from google_chat import delete_space_message as _delete
     return _json(await _delete(message_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_message(message_name: str) -> str:
     """Fetch a single message by its resource name.
 
@@ -277,7 +278,7 @@ async def get_message(message_name: str) -> str:
     from google_chat import get_message as _get_message
     return _json(await _get_message(message_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def update_message(message_name: str, text: str = None, file_paths: list = None, filenames: list = None, remove_quote_reply: bool = False) -> str:
     """Edit an existing message in a Google Chat space — update text, add/replace attachments, or both.
 
@@ -300,7 +301,7 @@ async def update_message(message_name: str, text: str = None, file_paths: list =
     from google_chat import update_message as _update_message
     return _json(await _update_message(message_name, text, file_paths, filenames, remove_quote_reply))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def create_reaction(message_name: str, emoji: str) -> str:
     """Add an emoji reaction to a message in a Google Chat space.
 
@@ -316,7 +317,7 @@ async def create_reaction(message_name: str, emoji: str) -> str:
     from google_chat import create_reaction as _create_reaction
     return _json(await _create_reaction(message_name, emoji))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_custom_emojis(query: str = None) -> str:
     """List the organization's custom emoji, as the ':name:' to pass to create_reaction.
 
@@ -329,7 +330,7 @@ async def list_custom_emojis(query: str = None) -> str:
     from google_chat import list_custom_emojis as _list
     return _json(await _list(query))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_reactions(message_name: str) -> str:
     """List all reactions on a message in a Google Chat space.
 
@@ -343,7 +344,7 @@ async def list_reactions(message_name: str) -> str:
     from google_chat import list_reactions as _list_reactions
     return _json(await _list_reactions(message_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def find_direct_message(user_id: str) -> str:
     """Find an existing DM space with a specific user.
 
@@ -359,7 +360,7 @@ async def find_direct_message(user_id: str) -> str:
     from google_chat import find_direct_message as _find_direct_message
     return _json(await _find_direct_message(user_id))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def set_user_name(user_id: str, name: str) -> str:
     """Save the name to show for a person Google cannot name.
 
@@ -378,7 +379,7 @@ async def set_user_name(user_id: str, name: str) -> str:
     from google_chat import set_user_name as _set
     return _json(_set(user_id, name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def create_space(space_type: str, members: List[str] = None, name: str = None,
                        description: str = None) -> str:
     """Create a named space, a group chat, or a DM, with its members, in one call.
@@ -400,7 +401,7 @@ async def create_space(space_type: str, members: List[str] = None, name: str = N
     from google_chat import create_space as _create
     return _json(await _create(space_type, members, name, description))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_my_status() -> str:
     """Your own Google Chat availability and custom status. Google does not expose
     anyone else's, so this cannot tell whether another person is online.
@@ -411,7 +412,7 @@ async def get_my_status() -> str:
     from google_chat import get_my_status as _get
     return _json(await _get())
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def set_my_status(state: str = None, minutes: int = None, status_text: str = None,
                         status_emoji: str = None, clear_status: bool = False) -> str:
     """Set your own availability and/or custom status, as the user asked.
@@ -431,7 +432,7 @@ async def set_my_status(state: str = None, minutes: int = None, status_text: str
     from google_chat import set_my_status as _set
     return _json(await _set(state, minutes, status_text, status_emoji, clear_status))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_space_notifications(space_name: str) -> str:
     """Your notification level and mute setting for one space.
 
@@ -441,7 +442,7 @@ async def get_space_notifications(space_name: str) -> str:
     from google_chat import get_space_notifications as _get
     return _json(await _get(space_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def set_space_notifications(space_name: str, notifications: str = None, muted: bool = None) -> str:
     """Change your notification level and/or mute a space. Affects only you.
 
@@ -457,7 +458,7 @@ async def set_space_notifications(space_name: str, notifications: str = None, mu
     from google_chat import set_space_notifications as _set
     return _json(await _set(space_name, notifications, muted))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def find_group_chats(user_ids: List[str]) -> str:
     """Find the group chats (unnamed multi-person DMs) whose human members are exactly
     you plus the given users. Use it before messaging a set of people, to reuse their
@@ -473,7 +474,7 @@ async def find_group_chats(user_ids: List[str]) -> str:
     from google_chat import find_group_chats as _find
     return _json(await _find(user_ids))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_space(space_name: str) -> str:
     """Details of one space.
 
@@ -493,7 +494,7 @@ async def get_space(space_name: str) -> str:
     from google_chat import get_space as _get_space
     return _json(await _get_space(space_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def get_member(space_name: str, user: str) -> str:
     """Look up one person's membership in a space: whether they are in it, their role
     and when they joined. Cheaper than get_members for a single person.
@@ -509,7 +510,7 @@ async def get_member(space_name: str, user: str) -> str:
     from google_chat import get_member as _get_member
     return _json(await _get_member(space_name, user))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_pinned_messages(space_name: str) -> str:
     """List the pinned messages of a space, with their content.
 
@@ -520,7 +521,7 @@ async def list_pinned_messages(space_name: str) -> str:
     from google_chat import list_pinned_messages as _list
     return _json(await _list(space_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def pin_message(message_name: str) -> str:
     """Pin a message in its space, for everyone in the space.
 
@@ -530,7 +531,7 @@ async def pin_message(message_name: str) -> str:
     from google_chat import pin_message as _pin
     return _json(await _pin(message_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def unpin_message(message_name: str) -> str:
     """Unpin a message, for everyone in the space.
 
@@ -540,7 +541,7 @@ async def unpin_message(message_name: str) -> str:
     from google_chat import unpin_message as _unpin
     return _json(await _unpin(message_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def list_space_events(space_name: str,
                             event_types: List[str] = None,
                             start_time: str = None,
@@ -573,7 +574,7 @@ async def list_space_events(space_name: str,
     from google_chat import list_space_events as _list
     return _json(await _list(space_name, event_types, start_time, end_time, limit))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def delete_reaction(reaction_name: str) -> str:
     """Remove a reaction from a Google Chat message.
 
@@ -589,7 +590,7 @@ async def delete_reaction(reaction_name: str) -> str:
     from google_chat import delete_reaction as _delete_reaction
     return _json(await _delete_reaction(reaction_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: str = None) -> str:
     """Download a file attachment from a Google Chat message.
 
@@ -608,7 +609,7 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
     from google_chat import download_attachment as _download
     return _json(await _download(resource_name, save_dir, content_name))
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 def authenticate() -> str:
     """Start (or restart) Google Chat OAuth authentication.
 
@@ -625,7 +626,7 @@ def authenticate() -> str:
     from google_chat import start_authentication
     return start_authentication()
 
-@mcp.tool()
+@mcp.tool(output_schema=None)
 def complete_authentication(callback_url: str) -> str:
     """Complete an in-progress OAuth flow for Google Chat.
 
@@ -690,8 +691,9 @@ def run_channel(args) -> None:
         comes from the BOT_NAME env var and cannot be changed by a tool."""
         return _json(channel.list_watched())
 
+    # On the event loop, like the poller that reads the same state.
     for fn in (watch_space, unwatch_space, list_watched_spaces):
-        mcp.add_tool(fn)
+        mcp.tool(fn, output_schema=None, run_in_thread=False)
 
     server = mcp._mcp_server
     server.instructions = INSTRUCTIONS
@@ -709,11 +711,11 @@ def run_channel(args) -> None:
             # so the channel takes them here.
             async with to_server:
                 async for message in read_stream:
-                    method = getattr(message.message.root, 'method', None) if isinstance(message, SessionMessage) else None
+                    method = getattr(message.message, 'method', None) if isinstance(message, SessionMessage) else None
                     if method == 'notifications/initialized':
                         initialized.set()
                     elif method == PERMISSION_REQUEST_METHOD:
-                        tg.start_soon(relay_permission, message.message.root.params)
+                        tg.start_soon(relay_permission, message.message.params)
                         continue
                     await to_server.send(message)
 
@@ -771,4 +773,4 @@ if __name__ == "__main__":
     elif args.channel:
         run_channel(args)
     else:
-        mcp.run()
+        mcp.run(show_banner=False)

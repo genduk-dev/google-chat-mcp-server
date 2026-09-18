@@ -526,7 +526,7 @@ class Channel:
     @staticmethod
     async def _notify(write_stream, method: str, params: Dict) -> None:
         notification = types.JSONRPCNotification(jsonrpc='2.0', method=method, params=params)
-        await write_stream.send(SessionMessage(types.JSONRPCMessage(notification)))
+        await write_stream.send(SessionMessage(notification))
 
     async def _poll_forever(self, write_stream) -> None:
         while True:
