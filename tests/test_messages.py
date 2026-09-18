@@ -366,5 +366,20 @@ class GetSpacesTest(unittest.TestCase):
                 asyncio.run(google_chat.list_chat_spaces(space_type='ROOM'))
 
 
+class SearchErrorTest(unittest.TestCase):
+    def search_failing_with(self, status):
+        error = google_chat.ChatApiError('POST', 'spaces/-/messages:search', status, 'API says no')
+        with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
+                mock.patch.object(google_chat, '_chat_request', side_effect=error):
+            with self.assertRaises(Exception) as ctx:
+                asyncio.run(google_chat.search_space_messages('deploy'))
+        return str(ctx.exception)
+
+    def test_status_specific_messages_keep_googles_detail(self):
+        self.assertIn('Developer Preview', self.search_failing_with(403))
+        self.assertIn('rejected filter', self.search_failing_with(400))
+        self.assertIn('HTTP 500 API says no', self.search_failing_with(500))
+
+
 if __name__ == '__main__':
     unittest.main()

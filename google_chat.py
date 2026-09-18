@@ -826,38 +826,6 @@ async def mark_space_read(space_name: str) -> Dict:
     return {'space': space_name, 'last_read': _short_time(state.get('lastReadTime'))}
 
 
-def _chat_api_post(path: str, body: Dict, creds: Credentials) -> Dict:
-    """POST to a Chat API v1 endpoint that the discovery client does not expose.
-
-    Used for methods missing from google-api-python-client's discovery document
-    (currently spaces.messages.search, a Developer Preview method). Mirrors the
-    raw-HTTP pattern in download_attachment.
-
-    Args:
-        path: API path below /v1/, e.g. 'spaces/-/messages:search'
-        body: JSON request body
-        creds: Valid credentials (get_credentials() has already refreshed them)
-
-    Returns:
-        Parsed JSON response
-
-    Raises:
-        urllib.error.HTTPError: propagated unchanged so callers can inspect .code
-    """
-    url = f"https://chat.googleapis.com/v1/{path}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode('utf-8'),
-        headers={
-            "Authorization": f"Bearer {creds.token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req) as resp:
-        return json.load(resp)
-
-
 async def search_space_messages(query: str,
                                 space_name: Optional[str] = None,
                                 limit: int = 50,
@@ -931,27 +899,27 @@ async def search_space_messages(query: str,
             if next_token:
                 body['pageToken'] = next_token
 
-            response = _chat_api_post(f"{parent}/messages:search", body, creds)
+            response = _chat_request(creds, 'POST', f"{parent}/messages:search", json=body)
             page_entries = [entry['message'] for entry in response.get('results', []) if 'message' in entry]
             results.extend(page_entries)
             next_token = response.get('nextPageToken')
             if not next_token or not page_entries:
                 break
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode('utf-8', errors='replace')[:500]
-        if e.code in (403, 404):
+    except ChatApiError as e:
+        detail = e.detail
+        if e.status in (403, 404):
             raise Exception(
                 "Failed to search messages: the spaces.messages.search method is in "
                 "Google Workspace Developer Preview and this account/project appears "
-                f"to have lost access (HTTP {e.code}). Other tools are unaffected. "
+                f"to have lost access (HTTP {e.status}). Other tools are unaffected. "
                 f"API said: {detail}"
             )
-        if e.code == 400:
+        if e.status == 400:
             raise Exception(
                 f"Failed to search messages: API rejected filter {filter_str!r} "
                 f"(HTTP 400). API said: {detail}"
             )
-        raise Exception(f"Failed to search messages: HTTP {e.code} {detail}")
+        raise Exception(f"Failed to search messages: HTTP {e.status} {detail}")
     except Exception as e:
         raise Exception(f"Failed to search messages: {str(e)}")
 
@@ -1330,16 +1298,24 @@ async def find_direct_message(user_id: str) -> Dict:
         raise Exception(f"Failed to find direct message: {error_str}")
 
 
+class ChatApiError(Exception):
+    def __init__(self, method: str, path: str, status: int, detail: str):
+        super().__init__(f"{method} {path} failed ({status}): {detail}")
+        self.status = status
+        self.detail = detail
+
+
 def _chat_request(creds: Credentials, method: str, path: str, **kwargs) -> Dict:
     """Call a Chat API v1 method that the installed discovery client lacks
-    (messagePins, findGroupChats). Raises with Google's own error message."""
+    (messagePins, findGroupChats, messages:search). Raises ChatApiError with
+    Google's own error message."""
     resp = _http(creds).request(method, f"{CHAT_API}/{path}", **kwargs)
     if not resp.ok:
         try:
             detail = resp.json()['error']['message']
         except (ValueError, KeyError):
-            detail = resp.text
-        raise Exception(f"{method} {path} failed ({resp.status_code}): {detail}")
+            detail = resp.text[:500]
+        raise ChatApiError(method, path, resp.status_code, detail)
     return resp.json() if resp.content else {}
 
 
