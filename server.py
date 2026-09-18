@@ -150,9 +150,13 @@ async def get_members(space_name: str) -> List[Dict]:
 async def send_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> Dict:
     """Send a message to a Google Chat space, optionally with file attachments.
 
-    To mention a user, use the syntax <users/USER_ID> in the text.
-    Use get_members() to look up user IDs.
-    To mention everyone, use <users/all>.
+    Formatting (Google Chat renders these):
+    - Links: [label](url) or <url|label> show as a hyperlinked label. A bare URL shows
+      in full, and a bare Google Drive URL also gets a large preview card; use it when
+      the file itself should stand out. Inline file chips cannot be created via the API.
+    - *bold* or **bold**, _italic_, ~strike~ or ~~strike~~, `code`, ```code block```.
+      Markdown inside code is sent as is. Headings and tables are not supported.
+    - Mentions: <users/USER_ID> (see get_members), or <users/all> for everyone.
 
     Args:
         space_name: The space to send to (format: 'spaces/SPACE_ID')
@@ -208,7 +212,8 @@ async def update_message(message_name: str, text: str = None, file_paths: list =
     Args:
         message_name: The resource name of the message to update
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
-        text: New text content for the message. If not provided, text is not changed.
+        text: New text content for the message, formatted as for send_message.
+              If not provided, text is not changed.
         file_paths: List of local file paths or HTTP(S) URLs to upload as attachments.
                    If provided, replaces any existing attachments. If not provided, attachments are not changed.
         filenames: List of display names for the attachments (matched by index to file_paths).

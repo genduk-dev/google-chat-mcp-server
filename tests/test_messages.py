@@ -149,5 +149,27 @@ class MessageTextTest(unittest.TestCase):
         self.assertEqual(google_chat._attachment_fields(a)['driveFileId'], 'F1')
         self.assertNotIn('driveFileId', google_chat._attachment_fields({'attachmentDataRef': {'resourceName': 'R'}}))
 
+
+class ToChatMarkupTest(unittest.TestCase):
+    def test_markdown_link_bold_and_strike_become_chat_markup(self):
+        self.assertEqual(google_chat.to_chat_markup('see [Pisang](https://p.example/q#a) **now** ~~old~~'),
+                         'see <https://p.example/q#a|Pisang> *now* ~old~')
+
+    def test_chat_markup_and_bare_urls_pass_through(self):
+        text = 'ok <https://x/1|done> *bold* _it_ https://docs.google.com/d/1 <users/42>'
+        self.assertEqual(google_chat.to_chat_markup(text), text)
+
+    def test_code_is_left_literal(self):
+        text = 'run `[a](https://x/1)` and\n```\n**not bold** [b](https://x/2)\n```\nthen [c](https://x/3)'
+        self.assertEqual(google_chat.to_chat_markup(text),
+                         'run `[a](https://x/1)` and\n```\n**not bold** [b](https://x/2)\n```\nthen <https://x/3|c>')
+
+    def test_non_http_brackets_are_not_links(self):
+        self.assertEqual(google_chat.to_chat_markup('array[0](x) and [todo]'), 'array[0](x) and [todo]')
+
+    def test_rendered_text_round_trips_to_the_same_markup(self):
+        m = {'formattedText': 'see <https://p.example/q|Pisang> *now*'}
+        self.assertEqual(google_chat.to_chat_markup(google_chat.message_text(m)), m['formattedText'])
+
 if __name__ == '__main__':
     unittest.main()

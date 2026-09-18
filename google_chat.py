@@ -380,6 +380,36 @@ def message_text(msg: Dict) -> str:
     return _CHAT_MARKUP.sub(render, formatted)
 
 
+# Code spans and fences are left alone so markdown inside them stays literal.
+_CODE = re.compile(r'```.*?```|`[^`\n]*`', re.DOTALL)
+_MD_LINK = re.compile(r'\[([^\]\n]+)\]\((https?://[^)\s]+)\)')
+_MD_BOLD = re.compile(r'\*\*(?=\S)(.+?)(?<=\S)\*\*')
+_MD_STRIKE = re.compile(r'~~(?=\S)(.+?)(?<=\S)~~')
+
+
+def to_chat_markup(text: str) -> str:
+    """Convert the common Markdown an agent writes into Google Chat markup.
+
+    Chat shows [label](url) and **bold** literally. Read tools render links as
+    [label](url), so an agent tends to write them back that way. This turns
+    [label](url) into <url|label>, **bold** into *bold* and ~~strike~~ into
+    ~strike~, outside code spans. Chat syntax that is already correct passes
+    through unchanged.
+    """
+    def convert(chunk: str) -> str:
+        chunk = _MD_LINK.sub(lambda m: f'<{m.group(2)}|{m.group(1)}>', chunk)
+        chunk = _MD_BOLD.sub(r'*\1*', chunk)
+        return _MD_STRIKE.sub(r'~\1~', chunk)
+
+    out, last = [], 0
+    for code in _CODE.finditer(text):
+        out.append(convert(text[last:code.start()]))
+        out.append(code.group(0))
+        last = code.end()
+    out.append(convert(text[last:]))
+    return ''.join(out)
+
+
 def _attachment_fields(a: Dict) -> Dict:
     fields = {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
               'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
@@ -784,7 +814,7 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
 
         service = _get_service('chat', 'v1', creds)
 
-        body = {'text': text}
+        body = {'text': to_chat_markup(text)}
         if quote_reply_message_name:
             # Fetch the quoted message to get lastUpdateTime (required by API)
             try:
@@ -953,7 +983,7 @@ async def update_message(message_name: str, text: str = None, file_paths: Option
 
         if text is not None:
             update_fields.append('text')
-            body['text'] = text
+            body['text'] = to_chat_markup(text)
 
         if remove_quote_reply:
             update_fields.append('quotedMessageMetadata')
