@@ -32,5 +32,5 @@ Two runtime modes sharing a common Google Chat client:
 - Python 3.13, managed with `uv` and `hatchling` build backend
 - MCP framework: `fastmcp`
 - Auth credentials stored in `credentials.json` (GCP OAuth client secrets, not committed) and `token.json` (runtime, path configurable via `--token-path`)
-- `APP_MESSAGE_PREFIX` env var controls the prefix for `clientAssignedMessageId` (default: `client-genduk-`), used to tag and identify app-sent messages
+- `APP_MESSAGE_PREFIX` env var controls the prefix for `clientAssignedMessageId` (default: `client-gchat-mcp-`), used to tag and identify app-sent messages. The channel also uses it to drop its own replies, so every process sharing a space must use the same value. Google Chat requires the ID to start with `client-`, use only lowercase letters, digits, and hyphens, and stay within 63 characters
 - `--raw-messages` flag disables field filtering (returns full API responses); filtered by default to save tokens

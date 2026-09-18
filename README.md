@@ -107,7 +107,7 @@ Resource name formats:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APP_MESSAGE_PREFIX` | `client-genduk-` | Prefix for `clientAssignedMessageId` to identify app-sent messages |
+| `APP_MESSAGE_PREFIX` | `client-gchat-mcp-` | Prefix for `clientAssignedMessageId` to identify app-sent messages. Google Chat requires it to start with `client-` and allows only lowercase letters, digits, and hyphens |
 
 ## Docker
 
