@@ -230,8 +230,8 @@ async def refresh_token(token_path: Optional[str] = None) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to refresh token: {str(e)}"
 
-def prefetch_space_members(space_name: str, creds: Credentials) -> None:
-    """Prefetch all members of a space and resolve their display names.
+def prefetch_space_members(space_name: str, creds: Credentials) -> List[Dict]:
+    """List all memberships of a space and cache their members' display names.
 
     First collects user IDs from Chat API memberships, then resolves names
     via People API directory lookup. Requires chat.memberships.readonly
@@ -240,54 +240,58 @@ def prefetch_space_members(space_name: str, creds: Credentials) -> None:
     Args:
         space_name: The space to fetch members from (format: 'spaces/SPACE_ID')
         creds: Valid credentials for API calls
-    """
-    try:
-        # Step 1: Get all member user IDs from Chat API
-        chat_service = _get_service('chat', 'v1', creds)
-        user_ids = []
-        page_token = None
-        while True:
-            list_args = {'parent': space_name, 'pageSize': 100}
-            if page_token:
-                list_args['pageToken'] = page_token
-            response = chat_service.spaces().members().list(**list_args).execute()
-            for membership in response.get('memberships', []):
-                member = membership.get('member', {})
-                user_id = member.get('name', '')
-                display_name = member.get('displayName', '')
-                if display_name and user_id:
-                    _user_display_name_cache[user_id] = display_name
-                elif user_id and user_id not in _user_display_name_cache:
-                    user_ids.append(user_id)
-            page_token = response.get('nextPageToken')
-            if not page_token:
-                break
 
-        # Step 2: Resolve names via People API for uncached users
-        if user_ids:
-            people_service = _get_service('people', 'v1', creds)
-            # People API getBatchGet supports up to 200 resource names
-            resource_names = [uid.replace('users/', 'people/') for uid in user_ids]
-            for i in range(0, len(resource_names), 50):
-                batch = resource_names[i:i+50]
-                try:
-                    result = people_service.people().getBatchGet(
-                        resourceNames=batch,
-                        personFields='names'
-                    ).execute()
-                    for person_response in result.get('responses', []):
-                        person = person_response.get('person', {})
-                        resource_name = person.get('resourceName', '')
-                        user_id = resource_name.replace('people/', 'users/')
-                        names = person.get('names', [])
-                        if names:
-                            display_name = names[0].get('displayName', '')
-                            if display_name:
-                                _user_display_name_cache[user_id] = display_name
-                except Exception as e:
-                    logger.debug("People API batch lookup failed: %s", e)
-    except Exception as e:
-        logger.debug("Failed to prefetch space members: %s", e)
+    Returns:
+        The raw memberships, so callers need not list them a second time.
+        A failed membership listing raises; a failed name lookup only leaves IDs unnamed.
+    """
+    memberships = []
+    # Step 1: Get all member user IDs from Chat API
+    chat_service = _get_service('chat', 'v1', creds)
+    user_ids = []
+    page_token = None
+    while True:
+        list_args = {'parent': space_name, 'pageSize': 100}
+        if page_token:
+            list_args['pageToken'] = page_token
+        response = chat_service.spaces().members().list(**list_args).execute()
+        memberships.extend(response.get('memberships', []))
+        for membership in response.get('memberships', []):
+            member = membership.get('member', {})
+            user_id = member.get('name', '')
+            display_name = member.get('displayName', '')
+            if display_name and user_id:
+                _user_display_name_cache[user_id] = display_name
+            elif user_id and user_id not in _user_display_name_cache:
+                user_ids.append(user_id)
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
+
+    # Step 2: Resolve names via People API for uncached users
+    if user_ids:
+        people_service = _get_service('people', 'v1', creds)
+        # People API getBatchGet supports up to 200 resource names
+        resource_names = [uid.replace('users/', 'people/') for uid in user_ids]
+        for i in range(0, len(resource_names), 50):
+            batch = resource_names[i:i+50]
+            try:
+                result = people_service.people().getBatchGet(
+                    resourceNames=batch,
+                    personFields='names'
+                ).execute()
+                for person_response in result.get('responses', []):
+                    person = person_response.get('person', {})
+                    resource_name = person.get('resourceName', '')
+                    user_id = resource_name.replace('people/', 'users/')
+                    names = person.get('names', [])
+                    if names:
+                        display_name = names[0].get('displayName', '')
+                        if display_name:
+                            _user_display_name_cache[user_id] = display_name
+            except Exception as e:
+                logger.debug("People API batch lookup failed: %s", e)
+    return memberships
 
 
 def get_user_display_name(sender: Dict, creds: Credentials) -> str:
@@ -461,6 +465,19 @@ def _sender_fields(msg: Dict, creds: Credentials) -> Dict:
     }
 
 
+def _member_fields(membership: Dict) -> Dict:
+    """A membership as get_members reports it. Names come from the cache prefetch fills."""
+    member = membership.get('member', {})
+    user_id = member.get('name', '')
+    return {
+        'user_id': user_id,
+        'display_name': _user_display_name_cache.get(user_id, member.get('displayName') or user_id),
+        'mention': f'<{user_id}>',
+        'type': member.get('type', 'HUMAN'),
+        'role': membership.get('role', 'ROLE_MEMBER'),
+    }
+
+
 async def list_space_members(space_name: str) -> List[Dict]:
     """List all members of a space with their user IDs and display names.
 
@@ -475,34 +492,13 @@ async def list_space_members(space_name: str) -> List[Dict]:
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        # Reuse prefetch to populate cache
-        prefetch_space_members(space_name, creds)
-
-        # Also collect raw membership data for role info
-        chat_service = _get_service('chat', 'v1', creds)
         members = []
-        page_token = None
-        while True:
-            list_args = {'parent': space_name, 'pageSize': 100}
-            if page_token:
-                list_args['pageToken'] = page_token
-            response = chat_service.spaces().members().list(**list_args).execute()
-            for membership in response.get('memberships', []):
-                member = membership.get('member', {})
-                user_id = member.get('name', '')
-                if not user_id:
-                    continue
-                display_name = _user_display_name_cache.get(user_id, user_id)
-                members.append({
-                    'user_id': user_id,
-                    'display_name': display_name,
-                    'mention': f'<{user_id}>',
-                    'type': member.get('type', 'HUMAN'),
-                    'role': membership.get('role', 'ROLE_MEMBER'),
-                })
-            page_token = response.get('nextPageToken')
-            if not page_token:
-                break
+        for membership in prefetch_space_members(space_name, creds):
+            member = membership.get('member', {})
+            user_id = member.get('name', '')
+            if not user_id:
+                continue
+            members.append(_member_fields(membership))
         return members
     except Exception as e:
         raise Exception(f"Failed to list space members: {str(e)}")
@@ -700,13 +696,23 @@ def _http(creds: Credentials) -> AuthorizedSession:
     return session
 
 
+def _last_active(space: Dict) -> Optional[datetime.datetime]:
+    """A space's lastActiveTime, or None when unknown. The API reports the Unix
+    epoch after the space's newest message is deleted."""
+    ts = space.get('lastActiveTime')
+    if not ts or ts.startswith('1970-01-01'):
+        return None
+    return _parse_time(ts)
+
+
 def _space_unread(creds: Credentials, space: Dict, self_id: str) -> Optional[Dict]:
     """Unread summary for one space, or None when everything is read."""
     http = _http(creds)
     resp = http.get(f"{CHAT_API}/users/me/{space['name']}/spaceReadState")
     resp.raise_for_status()
     last_read = resp.json().get('lastReadTime')
-    if last_read and _parse_time(space['lastActiveTime']) <= _parse_time(last_read):
+    active = _last_active(space)
+    if last_read and active and active <= _parse_time(last_read):
         return None
     params = {'pageSize': 100}
     if last_read:
@@ -730,7 +736,8 @@ def _space_unread(creds: Credentials, space: Dict, self_id: str) -> Optional[Dic
     count = len(others)
     return {'space': space['name'], 'name': name, 'type': space.get('spaceType'),
             'unread': f'{count}+' if page.get('nextPageToken') else count,
-            'last_read': _short_time(last_read), 'latest': _short_time(space['lastActiveTime'])}
+            'last_read': _short_time(last_read),
+            'latest': _short_time(space['lastActiveTime']) if active else _short_time(others[-1].get('createTime'))}
 
 
 async def list_unread_spaces(days: int = 1) -> Dict:
@@ -755,8 +762,9 @@ async def list_unread_spaces(days: int = 1) -> Dict:
         if not page_token:
             break
     since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
-    active = sorted((s for s in spaces if s.get('lastActiveTime') and _parse_time(s['lastActiveTime']) >= since),
-                    key=lambda s: s['lastActiveTime'], reverse=True)
+    # Spaces with an unknown last activity are checked too, or their unread messages would hide.
+    active = sorted((s for s in spaces if (_last_active(s) or since) >= since),
+                    key=lambda s: s.get('lastActiveTime', ''), reverse=True)
 
     def check(space):
         return _space_unread(creds, space, self_id)
@@ -1295,6 +1303,259 @@ async def find_direct_message(user_id: str) -> Dict:
         if '404' in error_str or 'NOT_FOUND' in error_str:
             return {}
         raise Exception(f"Failed to find direct message: {error_str}")
+
+
+def _chat_request(creds: Credentials, method: str, path: str, **kwargs) -> Dict:
+    """Call a Chat API v1 method that the installed discovery client lacks
+    (messagePins, findGroupChats). Raises with Google's own error message."""
+    resp = _http(creds).request(method, f"{CHAT_API}/{path}", **kwargs)
+    if not resp.ok:
+        try:
+            detail = resp.json()['error']['message']
+        except (ValueError, KeyError):
+            detail = resp.text
+        raise Exception(f"{method} {path} failed ({resp.status_code}): {detail}")
+    return resp.json() if resp.content else {}
+
+
+def _message_space(message_name: str) -> str:
+    """'spaces/S/messages/M' -> 'spaces/S'."""
+    parts = message_name.split('/')
+    if len(parts) != 4 or parts[0] != 'spaces' or parts[2] != 'messages':
+        raise ValueError(f"Expected 'spaces/SPACE_ID/messages/MESSAGE_ID', got {message_name!r}")
+    return '/'.join(parts[:2])
+
+
+async def list_pinned_messages(space_name: str) -> Dict:
+    """The pinned messages of a space, each in get_messages' compact message format."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    pins, page_token = [], None
+    while True:
+        params = {'pageSize': 100, **({'pageToken': page_token} if page_token else {})}
+        page = _chat_request(creds, 'GET', f"{space_name}/messagePins", params=params)
+        pins.extend(page.get('messagePins', []))
+        page_token = page.get('nextPageToken')
+        if not page_token:
+            break
+
+    def fetch(pin):
+        resp = _http(creds).get(f"{CHAT_API}/{pin['message']}")
+        return resp.json() if resp.ok else {'name': pin['message'], 'error': resp.status_code}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=UNREAD_WORKERS) as pool:
+        messages = await asyncio.get_running_loop().run_in_executor(None, lambda: list(pool.map(fetch, pins)))
+    out = []
+    for msg in messages:
+        if 'error' in msg:
+            # Pinned, but this user can no longer read it; say so instead of dropping it.
+            out.append({'id': msg['name'].removeprefix(f"{space_name}/messages/"), 'unavailable': msg['error']})
+        else:
+            out.append(_compact_message(msg, creds, space_name))
+    return {'space': space_name, 'pins': out}
+
+
+async def pin_message(message_name: str) -> Dict:
+    """Pin a message in its space."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    pin = _chat_request(creds, 'POST', f"{_message_space(message_name)}/messagePins",
+                        json={'message': message_name})
+    return {'pin': pin.get('name'), 'message': pin.get('message', message_name)}
+
+
+async def unpin_message(message_name: str) -> Dict:
+    """Unpin a message. A pin's ID is its message's ID, so the message name is enough."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    space = _message_space(message_name)
+    pin_name = f"{space}/messagePins/{message_name.split('/')[-1]}"
+    _chat_request(creds, 'DELETE', pin_name)
+    return {'unpinned': message_name}
+
+
+# Short names for spaceEvents.list event types: 'message.updated' is
+# 'google.workspace.chat.message.v1.updated'. Batch types come back
+# automatically with their single-event type, so they are not listed.
+SPACE_EVENT_TYPES = [
+    'message.created', 'message.updated', 'message.deleted',
+    'reaction.created', 'reaction.deleted',
+    'membership.created', 'membership.updated', 'membership.deleted',
+    'space.updated',
+]
+DEFAULT_SPACE_EVENT_TYPES = ['message.updated', 'message.deleted', 'reaction.created', 'reaction.deleted']
+MAX_SPACE_EVENTS = 1000
+
+
+def _event_type(full: str) -> str:
+    """'google.workspace.chat.message.v1.batchUpdated' -> 'message.updated'."""
+    resource, _, action = full.removeprefix('google.workspace.chat.').partition('.v1.')
+    action = action.removeprefix('batch')
+    return f"{resource}.{action[:1].lower()}{action[1:]}"
+
+
+def _event_payloads(event: Dict) -> List[Dict]:
+    """The resource payloads of one event; a batch event carries several."""
+    for key, data in event.items():
+        if not key.endswith('EventData'):
+            continue
+        if 'Batch' in key:
+            # e.g. {'messages': [{'message': ...}, ...]}
+            return [item for items in data.values() for item in items]
+        return [data]
+    return []
+
+
+def _rfc3339(value: str) -> str:
+    """Accept 'YYYY-MM-DD' (midnight UTC) or a full RFC 3339 timestamp."""
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        return f"{value}T00:00:00Z"
+    _parse_time(value)  # raises ValueError on anything else
+    return value
+
+
+def _space_event_entry(kind: str, time: str, payload: Dict, creds: Credentials, space_name: str) -> Dict:
+    prefix = f"{space_name}/messages/"
+    entry = {'time': _short_time(time), 'type': kind}
+    if 'message' in payload:
+        msg = payload['message']
+        if msg.get('deleteTime'):
+            # A deleted message comes back as its name and deletion only, even in
+            # the events from before it was deleted.
+            entry.update({'id': msg['name'].removeprefix(prefix), 'deleted': _short_time(msg['deleteTime']),
+                          'deletion': msg.get('deletionMetadata', {}).get('deletionType')})
+        else:
+            entry.update(_compact_message(msg, creds, space_name))
+    elif 'reaction' in payload:
+        reaction = payload['reaction']
+        entry['message'] = reaction['name'].split('/reactions/')[0].removeprefix(prefix)
+        if reaction.get('user'):
+            entry['user'] = get_user_display_name(reaction['user'], creds)
+        emoji = reaction.get('emoji', {})
+        if emoji:
+            entry['emoji'] = emoji.get('unicode') or emoji.get('customEmoji', {}).get('emojiName', '?')
+    elif 'membership' in payload:
+        membership = payload['membership']
+        entry.update({k: v for k, v in _member_fields(membership).items() if k != 'mention'})
+        if membership.get('state'):
+            entry['state'] = membership['state']
+    elif 'space' in payload:
+        entry['space'] = {k: v for k, v in payload['space'].items() if k in ('displayName', 'spaceDetails', 'spaceHistoryState')}
+    return entry
+
+
+async def list_space_events(space_name: str,
+                            event_types: Optional[List[str]] = None,
+                            start_time: Optional[str] = None,
+                            end_time: Optional[str] = None,
+                            limit: int = 100) -> Dict:
+    """What happened in a space, oldest first: edits, deletions, reactions, membership
+    and space changes. The API keeps 28 days of events.
+
+    Returns:
+        {'space', 'events': [{'time', 'type', ...}], 'more'?}. 'more' means events
+        after the last one returned were cut by limit; continue from its time.
+    """
+    types = event_types or DEFAULT_SPACE_EVENT_TYPES
+    unknown = [t for t in types if t not in SPACE_EVENT_TYPES]
+    if unknown:
+        raise ValueError(f"Unknown event types {unknown}; choose from {SPACE_EVENT_TYPES}")
+    if not 1 <= limit <= MAX_SPACE_EVENTS:
+        raise ValueError(f"limit must be between 1 and {MAX_SPACE_EVENTS}")
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    type_filter = ' OR '.join(
+        f'event_types:"google.workspace.chat.{t.replace(".", ".v1.")}"' for t in types)
+    clauses = [f'start_time="{_rfc3339(start_time)}"'] if start_time else []
+    if end_time:
+        clauses.append(f'end_time="{_rfc3339(end_time)}"')
+    clauses.append(f'({type_filter})' if clauses and len(types) > 1 else type_filter)
+    service = _get_service('chat', 'v1', creds)
+    events, page_token, more = [], None, False
+    while True:
+        args = {'parent': space_name, 'filter': ' AND '.join(clauses), 'pageSize': 100}
+        if page_token:
+            args['pageToken'] = page_token
+        response = service.spaces().spaceEvents().list(**args).execute()
+        for event in response.get('spaceEvents', []):
+            kind = _event_type(event['eventType'])
+            for payload in _event_payloads(event):
+                events.append(_space_event_entry(kind, event['eventTime'], payload, creds, space_name))
+        page_token = response.get('nextPageToken')
+        if len(events) >= limit:
+            more = len(events) > limit or bool(page_token)
+            events = events[:limit]
+            break
+        if not page_token:
+            break
+    result = {'space': space_name, 'events': events}
+    if more:
+        result['more'] = True
+    return result
+
+
+async def find_group_chats(user_ids: List[str]) -> List[Dict]:
+    """Group chats whose human members are exactly you plus user_ids."""
+    if not 1 <= len(user_ids) <= 49:
+        raise ValueError("Give between 1 and 49 users")
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    spaces, page_token = [], None
+    while True:
+        params = {'users': user_ids, 'spaceView': 'SPACE_VIEW_EXPANDED', 'pageSize': 30}
+        if page_token:
+            params['pageToken'] = page_token
+        page = _chat_request(creds, 'GET', 'spaces:findGroupChats', params=params)
+        spaces.extend(page.get('spaces', []))
+        page_token = page.get('nextPageToken')
+        if not page_token:
+            break
+    return [{k: v for k, v in {'space': s['name'], 'name': s.get('displayName'),
+                               'last_active': _short_time(s.get('lastActiveTime')),
+                               'uri': s.get('spaceUri')}.items() if v}
+            for s in spaces]
+
+
+async def get_space(space_name: str) -> Dict:
+    """One space's details, with permissionSettings flattened to {setting: [roles allowed]}."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    space = _get_service('chat', 'v1', creds).spaces().get(name=space_name).execute()
+    if not _last_active(space):
+        space.pop('lastActiveTime', None)
+    permissions = space.pop('permissionSettings', None)
+    if permissions:
+        roles = {'managersAllowed': 'managers', 'assistantManagersAllowed': 'assistant_managers',
+                 'membersAllowed': 'members'}
+        space['permissions'] = {setting: [label for key, label in roles.items() if allowed.get(key)]
+                                for setting, allowed in permissions.items()}
+    return space
+
+
+async def get_member(space_name: str, user: str) -> Dict:
+    """One member of a space, by 'users/ID' or 'users/EMAIL'."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    if not user.startswith('users/'):
+        raise ValueError(f"Expected 'users/USER_ID' or 'users/EMAIL', got {user!r}")
+    membership = _get_service('chat', 'v1', creds).spaces().members().get(
+        name=f"{space_name}/members/{user.removeprefix('users/')}").execute()
+    if membership.get('state') == 'NOT_A_MEMBER':
+        # Returned with 200 and no member, so there is no name, type or role to report.
+        return {'user_id': user, 'state': 'NOT_A_MEMBER'}
+    member = membership.get('member', {})
+    if member.get('name') and member.get('type') == 'HUMAN':
+        # Caches the name so _member_fields can report it.
+        get_user_display_name(member, creds)
+    return {**_member_fields(membership), 'state': membership.get('state'),
+            'joined': _short_time(membership.get('createTime'))}
 
 
 async def delete_reaction(reaction_name: str) -> Dict:

@@ -317,6 +317,114 @@ async def find_direct_message(user_id: str) -> Dict:
     return await _find_direct_message(user_id)
 
 @mcp.tool()
+async def find_group_chats(user_ids: List[str]) -> str:
+    """Find the group chats (unnamed multi-person DMs) whose human members are exactly
+    you plus the given users. Use it before messaging a set of people, to reuse their
+    existing group chat instead of starting another.
+
+    Args:
+        user_ids: 1-49 other people, as 'users/USER_ID' or 'users/EMAIL'. Leave yourself out.
+
+    Returns:
+        [{"space", "name" (only when the chat was named), "last_active", "uri"}];
+        empty when no such group chat exists
+    """
+    from google_chat import find_group_chats as _find
+    return json.dumps(await _find(user_ids), ensure_ascii=False, separators=(',', ':'))
+
+@mcp.tool()
+async def get_space(space_name: str) -> Dict:
+    """Details of one space: name, type, description and guidelines, history setting,
+    member count, access, when it was last active, and who may post, reply, manage
+    members or use @all (permissions: {setting: [roles allowed]}).
+
+    Args:
+        space_name: The space ('spaces/SPACE_ID')
+    """
+    from google_chat import get_space as _get_space
+    return await _get_space(space_name)
+
+@mcp.tool()
+async def get_member(space_name: str, user: str) -> Dict:
+    """Look up one person's membership in a space: whether they are in it, their role
+    and when they joined. Cheaper than get_members for a single person.
+
+    Args:
+        space_name: The space ('spaces/SPACE_ID')
+        user: 'users/USER_ID' or 'users/EMAIL'
+
+    Returns:
+        {"user_id", "display_name", "mention", "type", "role", "state", "joined"}, or
+        {"user_id", "state": "NOT_A_MEMBER"} when they are not in the space
+    """
+    from google_chat import get_member as _get_member
+    return await _get_member(space_name, user)
+
+@mcp.tool()
+async def list_pinned_messages(space_name: str) -> str:
+    """List the pinned messages of a space, with their content.
+
+    Returns:
+        {"space", "pins": [message]}, each message in get_messages' format; a pin whose
+        message you can no longer read is {"id", "unavailable": HTTP status}
+    """
+    from google_chat import list_pinned_messages as _list
+    return json.dumps(await _list(space_name), ensure_ascii=False, separators=(',', ':'))
+
+@mcp.tool()
+async def pin_message(message_name: str) -> Dict:
+    """Pin a message in its space, for everyone in the space.
+
+    Args:
+        message_name: 'spaces/SPACE_ID/messages/MESSAGE_ID'
+    """
+    from google_chat import pin_message as _pin
+    return await _pin(message_name)
+
+@mcp.tool()
+async def unpin_message(message_name: str) -> Dict:
+    """Unpin a message, for everyone in the space.
+
+    Args:
+        message_name: 'spaces/SPACE_ID/messages/MESSAGE_ID'
+    """
+    from google_chat import unpin_message as _unpin
+    return await _unpin(message_name)
+
+@mcp.tool()
+async def list_space_events(space_name: str,
+                            event_types: List[str] = None,
+                            start_time: str = None,
+                            end_time: str = None,
+                            limit: int = 100) -> str:
+    """What changed in a space, oldest first: messages edited or deleted, reactions added
+    or removed, people joining or leaving, space settings changed. get_messages shows
+    only the current state; use this to find what changed since a point in time.
+
+    Events carry the resource as it is now, so an edit shows the current text and a
+    deleted message shows only its id and deletion time. Google keeps 28 days of events.
+
+    Args:
+        space_name: The space ('spaces/SPACE_ID')
+        event_types: Any of message.created, message.updated, message.deleted,
+            reaction.created, reaction.deleted, membership.created, membership.updated,
+            membership.deleted, space.updated. Default: message.updated, message.deleted,
+            reaction.created, reaction.deleted.
+        start_time: Exclusive start, 'YYYY-MM-DD' (00:00Z) or RFC 3339. Default: 28 days ago.
+        end_time: Inclusive end, same format. Default: now.
+        limit: Max events (1-1000)
+
+    Returns:
+        {"space", "events": [{"time", "type", ...}], "more"?}. Message events carry the
+        message in get_messages' format (or "deleted" and "deletion"), reaction events
+        "message", "user", "emoji", membership events the member. "more": true means
+        later events were cut by limit; call again with start_time set to the last time.
+    """
+    from google_chat import list_space_events as _list
+    return json.dumps(await _list(space_name, event_types, start_time, end_time, limit),
+                      ensure_ascii=False, separators=(',', ':'))
+
+@mcp.tool()
 async def delete_reaction(reaction_name: str) -> Dict:
     """Remove a reaction from a Google Chat message.
 

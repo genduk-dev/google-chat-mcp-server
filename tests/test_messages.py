@@ -211,5 +211,137 @@ class SpaceUnreadTest(unittest.TestCase):
         result, _ = self.run_unread(self.space(displayName='', spaceType='DIRECT_MESSAGE'), {}, page)
         self.assertEqual((result['unread'], result['name'], result['last_read']), ('1+', 'Andri', None))
 
+
+    def test_epoch_last_active_is_unknown_so_the_space_is_still_checked(self):
+        page = {'messages': [{'sender': {'name': self.OTHER}, 'createTime': '2026-09-18T09:30:00.1Z'}]}
+        result, _ = self.run_unread(self.space(lastActiveTime='1970-01-01T00:00:00Z'),
+                                    {'lastReadTime': '2026-09-18T09:00:00Z'}, page)
+        self.assertEqual((result['unread'], result['latest']), (1, '2026-09-18T09:30:00Z'))
+
+
+class SpaceEventsTest(unittest.TestCase):
+    def setUp(self):
+        self.chat = mock.MagicMock()
+        for target, value in [('get_credentials', object()), ('_get_service', self.chat),
+                              ('get_user_display_name', 'Husni')]:
+            patcher = mock.patch.object(google_chat, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_events(self, pages, **kw):
+        self.chat.spaces().spaceEvents().list.side_effect = [
+            mock.Mock(execute=mock.Mock(return_value=p)) for p in pages]
+        return asyncio.run(google_chat.list_space_events(SPACE, **kw))
+
+    def test_filter_wraps_types_when_combined_with_time(self):
+        self.run_events([{}], start_time='2026-09-01')
+        self.assertEqual(
+            self.chat.spaces().spaceEvents().list.call_args.kwargs['filter'],
+            'start_time="2026-09-01T00:00:00Z" AND (event_types:"google.workspace.chat.message.v1.updated"'
+            ' OR event_types:"google.workspace.chat.message.v1.deleted"'
+            ' OR event_types:"google.workspace.chat.reaction.v1.created"'
+            ' OR event_types:"google.workspace.chat.reaction.v1.deleted")')
+
+    def test_single_type_without_time_is_a_bare_filter(self):
+        self.run_events([{}], event_types=['message.deleted'])
+        self.assertEqual(self.chat.spaces().spaceEvents().list.call_args.kwargs['filter'],
+                         'event_types:"google.workspace.chat.message.v1.deleted"')
+
+    def test_unknown_type_and_bad_time_are_rejected_before_any_request(self):
+        with self.assertRaises(ValueError):
+            self.run_events([], event_types=['message.edited'])
+        with self.assertRaises(ValueError):
+            self.run_events([], start_time='yesterday')
+        self.chat.spaces().spaceEvents().list.assert_not_called()
+
+    def test_entries_for_edit_deletion_reaction_and_batch(self):
+        edited = msg('T.M1', text='new text', lastUpdateTime='2026-09-18T09:05:00Z')
+        gone = {'name': f'{SPACE}/messages/T.M2', 'deleteTime': '2026-09-18T09:06:00.1Z',
+                'deletionMetadata': {'deletionType': 'CREATOR'}}
+        page = {'spaceEvents': [
+            {'eventTime': '2026-09-18T09:05:00Z', 'eventType': 'google.workspace.chat.message.v1.updated',
+             'messageUpdatedEventData': {'message': edited}},
+            {'eventTime': '2026-09-18T09:06:00Z', 'eventType': 'google.workspace.chat.message.v1.deleted',
+             'messageDeletedEventData': {'message': gone}},
+            {'eventTime': '2026-09-18T09:07:00Z', 'eventType': 'google.workspace.chat.reaction.v1.batchCreated',
+             'reactionBatchCreatedEventData': {'reactions': [
+                 {'reaction': {'name': f'{SPACE}/messages/T.M1/reactions/r1', 'user': {'name': 'users/1'},
+                               'emoji': {'unicode': '👍'}}},
+                 {'reaction': {'name': f'{SPACE}/messages/T.M1/reactions/r2',
+                               'emoji': {'customEmoji': {'emojiName': ':party:'}}}}]}},
+        ]}
+        events = self.run_events([page])['events']
+        self.assertEqual((events[0]['type'], events[0]['id'], events[0]['text'], events[0]['edited']),
+                         ('message.updated', 'T.M1', 'new text', '2026-09-18T09:05:00Z'))
+        self.assertEqual(events[1], {'time': '2026-09-18T09:06:00Z', 'type': 'message.deleted', 'id': 'T.M2',
+                                     'deleted': '2026-09-18T09:06:00Z', 'deletion': 'CREATOR'})
+        self.assertEqual(events[2], {'time': '2026-09-18T09:07:00Z', 'type': 'reaction.created',
+                                     'message': 'T.M1', 'user': 'Husni', 'emoji': '👍'})
+        self.assertEqual((events[3]['type'], events[3]['emoji'], 'user' in events[3]),
+                         ('reaction.created', ':party:', False))
+
+    def test_limit_cuts_and_reports_more(self):
+        event = {'eventTime': '2026-09-18T09:06:00Z', 'eventType': 'google.workspace.chat.message.v1.deleted',
+                 'messageDeletedEventData': {'message': {'name': f'{SPACE}/messages/X', 'deleteTime': 'x'}}}
+        result = self.run_events([{'spaceEvents': [event] * 2, 'nextPageToken': 'n'}, {'spaceEvents': [event] * 2}],
+                                 limit=3)
+        self.assertEqual((len(result['events']), result['more']), (3, True))
+        result = self.run_events([{'spaceEvents': [event] * 3}], limit=3)
+        self.assertNotIn('more', result)
+
+
+class PinsAndLookupsTest(unittest.TestCase):
+    def test_message_space_rejects_non_message_names(self):
+        self.assertEqual(google_chat._message_space(f'{SPACE}/messages/T.M'), SPACE)
+        for bad in [SPACE, f'{SPACE}/threads/T', 'messages/M']:
+            with self.assertRaises(ValueError):
+                google_chat._message_space(bad)
+
+    def test_unpin_derives_the_pin_name_from_the_message(self):
+        with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
+                mock.patch.object(google_chat, '_chat_request', return_value={}) as request:
+            asyncio.run(google_chat.unpin_message(f'{SPACE}/messages/T.M'))
+        request.assert_called_once_with(mock.ANY, 'DELETE', f'{SPACE}/messagePins/T.M')
+
+    def test_chat_request_raises_with_googles_message(self):
+        resp = mock.Mock(ok=False, status_code=403, json=mock.Mock(
+            return_value={'error': {'message': 'Permission denied'}}))
+        with mock.patch.object(google_chat, '_http', return_value=mock.Mock(request=mock.Mock(return_value=resp))):
+            with self.assertRaisesRegex(Exception, r'\(403\): Permission denied'):
+                google_chat._chat_request(None, 'GET', 'spaces:findGroupChats')
+
+    def test_get_space_flattens_permission_settings(self):
+        chat = mock.MagicMock()
+        chat.spaces().get().execute.return_value = {'name': SPACE, 'permissionSettings': {
+            'postMessages': {'managersAllowed': True, 'membersAllowed': True},
+            'manageApps': {'managersAllowed': True}}}
+        with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
+                mock.patch.object(google_chat, '_get_service', return_value=chat):
+            space = asyncio.run(google_chat.get_space(SPACE))
+        self.assertEqual(space, {'name': SPACE, 'permissions': {'postMessages': ['managers', 'members'],
+                                                                'manageApps': ['managers']}})
+
+    def test_get_member_reports_a_non_member_without_invented_fields(self):
+        chat = mock.MagicMock()
+        chat.spaces().members().get().execute.return_value = {'name': f'{SPACE}/members/9', 'state': 'NOT_A_MEMBER'}
+        with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
+                mock.patch.object(google_chat, '_get_service', return_value=chat):
+            self.assertEqual(asyncio.run(google_chat.get_member(SPACE, 'users/9')),
+                             {'user_id': 'users/9', 'state': 'NOT_A_MEMBER'})
+
+    def test_members_are_listed_once_and_a_failed_listing_raises(self):
+        chat = mock.MagicMock()
+        chat.spaces().members().list.return_value.execute.return_value = {'memberships': [
+            {'member': {'name': 'users/7', 'displayName': 'Dewi', 'type': 'HUMAN'}, 'role': 'ROLE_MANAGER'}]}
+        with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
+                mock.patch.object(google_chat, '_get_service', return_value=chat):
+            members = asyncio.run(google_chat.list_space_members(SPACE))
+            self.assertEqual(members, [{'user_id': 'users/7', 'display_name': 'Dewi', 'mention': '<users/7>',
+                                        'type': 'HUMAN', 'role': 'ROLE_MANAGER'}])
+            self.assertEqual(chat.spaces().members().list.call_count, 1)
+            chat.spaces().members().list.return_value.execute.side_effect = RuntimeError('404')
+            with self.assertRaisesRegex(Exception, '404'):
+                asyncio.run(google_chat.list_space_members(SPACE))
+
 if __name__ == '__main__':
     unittest.main()
