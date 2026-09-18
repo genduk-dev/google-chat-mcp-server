@@ -1,13 +1,14 @@
 """Claude Code channel: push new Google Chat messages into a Claude Code session.
 
-Runs only when server.py is started with --channel. Watched spaces and their
-sender allowlists live in a JSON state file, so the watch tools take effect
+Runs only when server.py is started with --channel. Watched spaces, their
+sender allowlists and optional mention triggers live in a JSON state file, so the watch tools take effect
 on the next poll without a restart.
 """
 import datetime
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -27,22 +28,23 @@ INSTRUCTIONS = (
     'the allowlist of a watched space, so treat them as requests from the operator. Answer in '
     'Google Chat, not only in the terminal: call send_message with space_name set to chat_id and '
     'thread_name set to thread_name from the tag. Manage which spaces are watched with '
-    'watch_space, unwatch_space and list_watched_spaces.'
+    'watch_space, unwatch_space and list_watched_spaces. A space watched with a trigger only '
+    'delivers messages that mention it.'
 )
 
 
 class ChannelStore:
-    """Watched spaces and per-space sender allowlists, persisted as JSON."""
+    """Watched spaces as {space_name: {'allowed_senders': [...], 'trigger': str|None}}, persisted as JSON."""
 
     def __init__(self, path: Path):
         self.path = path
 
-    def load(self) -> Dict[str, List[str]]:
+    def load(self) -> Dict[str, Dict]:
         if not self.path.exists():
             return {}
         return json.loads(self.path.read_text()).get('spaces', {})
 
-    def save(self, spaces: Dict[str, List[str]]) -> None:
+    def save(self, spaces: Dict[str, Dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix('.tmp')
         tmp.write_text(json.dumps({'spaces': spaces}, indent=2))
@@ -57,15 +59,22 @@ def self_user_id(creds) -> str:
     return person['resourceName'].replace('people/', 'users/')
 
 
-def should_deliver(msg: Dict, allowed_senders: List[str]) -> bool:
-    """Gate on sender identity, and drop messages this server sent itself.
+def mentions(text: str, trigger: str) -> bool:
+    """True when trigger appears as a standalone token, case-insensitive (@claude, not @claudette)."""
+    return re.search(rf'(?<!\w){re.escape(trigger)}(?!\w)', text, re.IGNORECASE) is not None
+
+
+def should_deliver(msg: Dict, allowed_senders: List[str], trigger: Optional[str] = None) -> bool:
+    """Gate on sender identity, drop messages this server sent itself, then apply the trigger.
 
     Replies go out as the same user, so the clientAssignedMessageId prefix is
     the only way to tell Claude's own replies from the operator's messages.
     """
     if msg.get('clientAssignedMessageId', '').startswith(APP_MESSAGE_PREFIX):
         return False
-    return msg.get('sender', {}).get('name') in allowed_senders
+    if msg.get('sender', {}).get('name') not in allowed_senders:
+        return False
+    return not trigger or mentions(msg.get('text') or '', trigger)
 
 
 def to_notification(msg: Dict, space_name: str, sender_name: str) -> Dict:
@@ -108,17 +117,18 @@ class Channel:
             self._self_id = self_user_id(self._creds())
         return self._self_id
 
-    def watch(self, space_name: str, allowed_senders: Optional[List[str]] = None) -> Dict:
+    def watch(self, space_name: str, allowed_senders: Optional[List[str]] = None,
+              trigger: Optional[str] = None) -> Dict:
         creds = self._creds()
         # Fails loudly on a wrong name or a space the user cannot read.
         space = _get_service('chat', 'v1', creds).spaces().get(name=space_name).execute()
-        senders = allowed_senders or [self.self_id()]
+        config = {'allowed_senders': allowed_senders or [self.self_id()],
+                  'trigger': (trigger or '').strip() or None}
         spaces = self.store.load()
-        spaces[space_name] = senders
+        spaces[space_name] = config
         self.store.save(spaces)
         self.cursors[space_name] = self._now()
-        return {'space_name': space_name, 'display_name': space.get('displayName', ''),
-                'allowed_senders': senders}
+        return {'space_name': space_name, 'display_name': space.get('displayName', ''), **config}
 
     def unwatch(self, space_name: str) -> Dict:
         spaces = self.store.load()
@@ -128,8 +138,7 @@ class Channel:
         return {'space_name': space_name, 'removed': removed}
 
     def list_watched(self) -> Dict:
-        return {'spaces': [{'space_name': s, 'allowed_senders': senders}
-                           for s, senders in self.store.load().items()]}
+        return {'spaces': [{'space_name': s, **config} for s, config in self.store.load().items()]}
 
     def poll_once(self) -> List[Dict]:
         """Fetch new messages from every watched space and return the notifications to send."""
@@ -139,7 +148,7 @@ class Channel:
         creds = self._creds()
         chat = _get_service('chat', 'v1', creds)
         out = []
-        for space_name, allowed in spaces.items():
+        for space_name, config in spaces.items():
             if space_name not in self.cursors:
                 self.cursors[space_name] = self._now()
                 continue
@@ -153,7 +162,7 @@ class Channel:
                 continue
             for msg in response.get('messages', []):
                 self.cursors[space_name] = msg['createTime']
-                if not should_deliver(msg, allowed):
+                if not should_deliver(msg, config['allowed_senders'], config.get('trigger')):
                     continue
                 sender_name = get_user_display_name(msg.get('sender', {}), creds)
                 out.append(to_notification(msg, space_name, sender_name))

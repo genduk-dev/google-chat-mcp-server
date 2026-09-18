@@ -31,6 +31,15 @@ class GateTest(unittest.TestCase):
         msg = message('m1', client_id=f'{APP_MESSAGE_PREFIX}abc')
         self.assertFalse(should_deliver(msg, [OWNER]))
 
+    def test_trigger_requires_a_standalone_case_insensitive_mention(self):
+        self.assertTrue(should_deliver(message('m1', text='hey @Claude check this'), [OWNER], '@claude'))
+        self.assertTrue(should_deliver(message('m1', text='@claude: deploy'), [OWNER], '@claude'))
+        self.assertFalse(should_deliver(message('m1', text='lunch?'), [OWNER], '@claude'))
+        self.assertFalse(should_deliver(message('m1', text='ask @claudette'), [OWNER], '@claude'))
+
+    def test_trigger_does_not_bypass_the_sender_allowlist(self):
+        self.assertFalse(should_deliver(message('m1', sender=OTHER, text='@claude run it'), [OWNER], '@claude'))
+
 
 class NotificationTest(unittest.TestCase):
     def test_meta_keys_are_identifiers_and_carry_routing(self):
@@ -53,8 +62,8 @@ class StoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             store = ChannelStore(Path(d) / 'nested' / 'state.json')
             self.assertEqual(store.load(), {})
-            store.save({SPACE: [OWNER]})
-            self.assertEqual(store.load(), {SPACE: [OWNER]})
+            store.save({SPACE: {'allowed_senders': [OWNER], 'trigger': '@claude'}})
+            self.assertEqual(store.load(), {SPACE: {'allowed_senders': [OWNER], 'trigger': '@claude'}})
             self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
 
 
@@ -62,7 +71,7 @@ class PollTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.store = ChannelStore(Path(self.dir.name) / 'state.json')
-        self.store.save({SPACE: [OWNER]})
+        self.store.save({SPACE: {'allowed_senders': [OWNER], 'trigger': None}})
         self.chat = mock.MagicMock()
         patches = [
             mock.patch.object(channel, 'get_credentials', return_value=object()),
@@ -100,6 +109,17 @@ class PollTest(unittest.TestCase):
         kwargs = self.chat.spaces().messages().list.call_args.kwargs
         self.assertEqual(kwargs['filter'], 'createTime > "2026-09-18T06:00:00Z"')
 
+    def test_trigger_set_by_watch_filters_the_poll(self):
+        ch = Channel(self.store, 5)
+        self.chat.spaces().get.return_value.execute.return_value = {}
+        ch.watch(SPACE, [OWNER], '  @claude ')
+        self.assertEqual(self.store.load()[SPACE]['trigger'], '@claude')
+        self.list_returns([
+            message('m1', text='just chatting', create_time='2026-09-18T07:00:01Z'),
+            message('m2', text='@claude summarize', create_time='2026-09-18T07:00:02Z'),
+        ])
+        self.assertEqual([n['content'] for n in ch.poll_once()], ['@claude summarize'])
+
     def test_failed_space_keeps_its_cursor(self):
         ch = Channel(self.store, 5)
         ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
@@ -113,7 +133,9 @@ class PollTest(unittest.TestCase):
         with mock.patch.object(channel, 'self_user_id', return_value=OWNER):
             result = ch.watch(SPACE)
         self.assertEqual(result['allowed_senders'], [OWNER])
-        self.assertEqual(ch.list_watched(), {'spaces': [{'space_name': SPACE, 'allowed_senders': [OWNER]}]})
+        self.assertIsNone(result['trigger'])
+        self.assertEqual(ch.list_watched(),
+                         {'spaces': [{'space_name': SPACE, 'allowed_senders': [OWNER], 'trigger': None}]})
         self.assertEqual(ch.unwatch(SPACE), {'space_name': SPACE, 'removed': True})
         self.assertEqual(ch.list_watched(), {'spaces': []})
 
