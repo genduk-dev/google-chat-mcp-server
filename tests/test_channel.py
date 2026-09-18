@@ -219,22 +219,69 @@ class PollerLockTest(unittest.TestCase):
         ChannelStore(self.state).save({SPACE: {'allowed_senders': [OWNER], 'mention_only': False}})
 
     def channel(self):
-        ch = Channel(ChannelStore(self.state), 5)
-        self.addCleanup(lambda: ch._lock_fd is not None and os.close(ch._lock_fd))
-        return ch
+        return Channel(ChannelStore(self.state), 5)
 
     def exit_process(self, ch):
-        os.close(ch._lock_fd)
-        ch._lock_fd = None
+        ch.release()
+
+    def lease(self):
+        return json.loads((Path(self.dir.name) / 'channel.lease').read_text())
+
+    def age_lease(self, by):
+        lease = self.lease()
+        heartbeat = channel.datetime.datetime.fromisoformat(lease['heartbeat']) - by
+        lease['heartbeat'] = heartbeat.isoformat()
+        (Path(self.dir.name) / 'channel.lease').write_text(json.dumps(lease))
 
     def test_only_one_session_polls_and_the_other_takes_over_when_it_exits(self):
         a, b = self.channel(), self.channel()
         self.assertTrue(a.try_acquire())
         self.assertFalse(b.try_acquire())
-        self.assertEqual(b.poller_status(), {'active_here': False, 'holder_pid': os.getpid()})
+        status = b.poller_status()
+        self.assertEqual((status['active_here'], status['holder_pid']), (False, os.getpid()))
         self.exit_process(a)
         self.assertTrue(b.try_acquire())
-        self.assertEqual(b.poller_status(), {'active_here': True, 'holder_pid': os.getpid()})
+        self.assertTrue(b.poller_status()['active_here'])
+
+    def test_every_poll_renews_the_heartbeat(self):
+        a = self.channel()
+        a.try_acquire()
+        self.age_lease(channel.datetime.timedelta(seconds=30))
+        before = self.lease()['heartbeat']
+        self.assertTrue(a.try_acquire())
+        self.assertGreater(self.lease()['heartbeat'], before)
+
+    def test_a_crashed_holder_is_replaced_at_once(self):
+        a, b = self.channel(), self.channel()
+        a.try_acquire()
+        with mock.patch.object(channel.os, 'kill', side_effect=ProcessLookupError):
+            self.assertTrue(b.try_acquire())
+
+    def test_a_hung_holder_is_replaced_and_stands_down_when_it_wakes(self):
+        a, b = self.channel(), self.channel()
+        a.try_acquire()
+        self.assertFalse(b.try_acquire())
+        self.age_lease(channel.LEASE_TTL)   # a stopped renewing
+        self.assertTrue(b.try_acquire())
+        self.assertFalse(a.try_acquire())   # a wakes up, sees b's lease
+        self.assertFalse(a.active)
+        self.assertTrue(b.try_acquire())
+
+    def test_release_leaves_another_holders_lease_alone(self):
+        a, b = self.channel(), self.channel()
+        a.try_acquire()
+        self.age_lease(channel.LEASE_TTL)
+        b.try_acquire()
+        a.release()   # a still thinks it is active
+        self.assertEqual(self.lease()['token'], b._token)
+
+    def test_contended_lease_lock_skips_this_poll(self):
+        a = self.channel()
+        import fcntl
+        fd = os.open(a.lease_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertFalse(a.try_acquire())
 
     def write_saved(self, cursors, saved_at):
         (Path(self.dir.name) / 'channel_cursors.json').write_text(
@@ -292,15 +339,14 @@ class PollerLockTest(unittest.TestCase):
         saved = json.loads((Path(self.dir.name) / 'channel_cursors.json').read_text())
         self.assertEqual(list(saved['cursors']), [SPACE])
 
-    def test_stale_lock_pid_is_reported_as_no_holder(self):
-        (Path(self.dir.name) / 'channel.lock').write_text('999999')
-        with mock.patch.object(channel.os, 'kill', side_effect=ProcessLookupError):
-            self.assertEqual(self.channel().poller_status(), {'active_here': False, 'holder_pid': None})
+    def test_stale_lease_is_reported_without_a_holder(self):
+        a = self.channel()
+        a.try_acquire()
+        for error in (ProcessLookupError, PermissionError):   # PermissionError: PID reused by another user
+            with mock.patch.object(channel.os, 'kill', side_effect=error):
+                status = self.channel().poller_status()
+            self.assertEqual((status['holder_pid'], status['stale']), (None, True))
 
-    def test_lock_pid_reused_by_another_users_process_is_no_holder(self):
-        (Path(self.dir.name) / 'channel.lock').write_text('1')
-        with mock.patch.object(channel.os, 'kill', side_effect=PermissionError):
-            self.assertEqual(self.channel().poller_status(), {'active_here': False, 'holder_pid': None})
 
 if __name__ == '__main__':
     unittest.main()

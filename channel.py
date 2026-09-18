@@ -4,10 +4,12 @@ Runs only when server.py is started with --channel. Watched spaces, their
 sender allowlists and whether they require an @BOT_NAME mention live in a JSON state file, so the watch tools take effect
 on the next poll without a restart.
 
-Every channel session on the machine shares that state, so only the process
-holding an flock on channel.lock polls; the others stand by and take over when
-it exits. The holder persists its cursors, so a takeover resumes where the
-previous poller stopped instead of skipping the gap.
+Every channel session on the machine shares that state, so only one process
+polls: the holder of a lease in channel.lease, renewed on every poll. The others
+stand by and take over when the holder exits, dies, or stops renewing because it
+hung. A holder that wakes up after a takeover sees the lease is no longer its
+own and stands down. The holder persists its cursors, so a takeover resumes
+where the previous poller stopped instead of skipping the gap.
 """
 import datetime
 import fcntl
@@ -15,6 +17,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -48,6 +51,9 @@ RESUME_WINDOW = datetime.timedelta(minutes=10)
 # The poller re-saves unchanged cursors this often, so a quiet space still
 # looks alive to a takeover.
 CURSOR_HEARTBEAT = datetime.timedelta(minutes=1)
+# A lease not renewed for this long belongs to a hung poller and may be taken.
+# Tool calls block the event loop too, so it must outlast the slowest of them.
+LEASE_TTL = datetime.timedelta(seconds=60)
 
 
 class ChannelStore:
@@ -104,31 +110,77 @@ class Channel:
     def __init__(self, store: ChannelStore, poll_seconds: float):
         self.store = store
         self.poll_seconds = poll_seconds
-        self.lock_path = store.path.with_name('channel.lock')
+        self.lease_path = store.path.with_name('channel.lease')
+        # Held only while the lease is read and written, so two standbys cannot
+        # both take a stale lease. Not channel.lock: older versions hold that
+        # one for their whole life, and waiting on it would never return.
+        self.lease_lock_path = store.path.with_name('channel.lease.lock')
         self.cursor_path = store.path.with_name('channel_cursors.json')
         # Per-space cursor: only messages created after it are delivered, so
         # watching a space never replays history.
         self.cursors: Dict[str, str] = {}
         self._saved_cursors: Dict[str, str] = {}
         self._saved_at: Optional[datetime.datetime] = None
-        self._lock_fd: Optional[int] = None
+        self._token = uuid.uuid4().hex
+        self.active = False
+
+    def _read_lease(self) -> Optional[Dict]:
+        try:
+            return json.loads(self.lease_path.read_text())
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def _holder_alive(lease: Dict, now: datetime.datetime) -> bool:
+        """The lease's holder is running and renewed it within LEASE_TTL."""
+        if now - datetime.datetime.fromisoformat(lease['heartbeat']) >= LEASE_TTL:
+            return False  # hung, or stopped
+        try:
+            os.kill(lease['pid'], 0)
+        except (ProcessLookupError, PermissionError):
+            # Exited without releasing. A reused PID owned by another user raises
+            # PermissionError; that process cannot be a channel session of ours.
+            return False
+        return True
 
     def try_acquire(self) -> bool:
-        """Become the poller if no other process is. The kernel drops the lock when this process exits."""
-        if self._lock_fd is not None:
-            return True
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        """Renew this process's lease, or take it over if its holder is gone or hung.
+
+        Called before every poll, so it doubles as the heartbeat. Returns whether
+        this process should poll now.
+        """
+        self.lease_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.lease_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Another process is reading the lease this instant; decide next poll.
+                return False
+            now = datetime.datetime.now(datetime.timezone.utc)
+            lease = self._read_lease()
+            if lease and lease.get('token') != self._token and self._holder_alive(lease, now):
+                if self.active:
+                    logger.warning("Channel poller lease taken by pid %s; standing down", lease['pid'])
+                self.active = False
+                return False
+            write_private(self.lease_path, json.dumps(
+                {'pid': os.getpid(), 'token': self._token, 'heartbeat': now.isoformat()}))
+            if not self.active:
+                self.active = True
+                self._resume_cursors()
+            return True
+        finally:
             os.close(fd)
-            return False
-        os.ftruncate(fd, 0)
-        os.write(fd, str(os.getpid()).encode())
-        self._lock_fd = fd
-        self._resume_cursors()
-        return True
+
+    def release(self) -> None:
+        """Give up the lease on a clean exit, so a standby takes over on its next poll."""
+        if not self.active:
+            return
+        lease = self._read_lease()
+        if lease and lease.get('token') == self._token:
+            self.lease_path.unlink(missing_ok=True)
+        self.active = False
 
     def _resume_cursors(self) -> None:
         # Cursors a standby set in watch() may be hours old; the previous poller's
@@ -151,21 +203,16 @@ class Channel:
         self._saved_cursors, self._saved_at = cursors, now
 
     def poller_status(self) -> Dict:
-        if self._lock_fd is not None:
-            return {'active_here': True, 'holder_pid': os.getpid()}
-        pid = None
-        if self.lock_path.exists():
-            text = self.lock_path.read_text().strip()
-            pid = int(text) if text.isdigit() else None
-        if pid is not None:
-            try:
-                os.kill(pid, 0)
-            except (ProcessLookupError, PermissionError):
-                # Stale: the holder exited and nobody has taken over yet. A reused
-                # PID owned by another user raises PermissionError; it cannot hold
-                # our owner-only lock file either.
-                pid = None
-        return {'active_here': False, 'holder_pid': pid}
+        lease = self._read_lease()
+        if not lease:
+            return {'active_here': False, 'holder_pid': None}
+        now = datetime.datetime.now(datetime.timezone.utc)
+        status = {'active_here': lease.get('token') == self._token and self.active,
+                  'holder_pid': lease['pid'] if self._holder_alive(lease, now) else None,
+                  'heartbeat': lease['heartbeat'].split('.')[0] + 'Z'}
+        if status['holder_pid'] is None:
+            status['stale'] = True  # the next standby poll takes it over
+        return status
 
     def _now(self) -> str:
         return datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -243,6 +290,12 @@ class Channel:
         ends is outside the protocol, so the client may drop it.
         """
         await initialized.wait()
+        try:
+            await self._poll_forever(write_stream)
+        finally:
+            self.release()
+
+    async def _poll_forever(self, write_stream) -> None:
         while True:
             try:
                 # Blocks the event loop like every tool call here does. A worker

@@ -557,8 +557,9 @@ def run_channel(args) -> None:
     def list_watched_spaces() -> str:
         """List the channel config: the bot name and its @mention, the message ID prefix
         that marks this server's own messages, which process is polling (poller.active_here
-        is false when another channel session on this machine receives the messages), and
-        each watched space with its allowed senders and mention_only setting. The bot name
+        is false when another channel session on this machine receives the messages;
+        poller.heartbeat is its last renewal, and poller.stale means that poller exited or
+        hung and a standby session takes over within a poll), and each watched space with its allowed senders and mention_only setting. The bot name
         comes from the BOT_NAME env var and cannot be changed by a tool."""
         return _json(channel.list_watched())
 
