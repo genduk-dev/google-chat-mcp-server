@@ -45,7 +45,8 @@ async def get_messages(space_name: str,
     A message's full name is "{space}/messages/{id}"; use it for get_message, reactions,
     quote replies and attachments. Pass a group's "thread" as send_message's thread_name
     to reply in it. Optional message fields appear only when set: sender_type (when not
-    HUMAN), sent_by_app, edited, quoted, attachment, reactions ({emoji: count}).
+    HUMAN), sent_by_app, root (the thread's first message), edited, quoted, attachment,
+    reactions ({emoji or :custom_name:: count}).
 
     Args:
         space_name: The space to fetch messages from ('spaces/SPACE_ID')

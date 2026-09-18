@@ -35,11 +35,12 @@ class ListSpaceMessagesTest(unittest.TestCase):
 
     def test_groups_by_thread_and_drops_empty_or_implied_fields(self):
         self.pages = [{'messages': [msg('T1', 'T1', 'root'), msg('T2', 'T2', 'other'),
-                                    msg('T1.a', 'T1', 'reply', lastUpdateTime='2026-09-18T10:00:00.5Z')]}]
+                                    msg('T1.a', 'T1', 'reply', threadReply=True,
+                                        lastUpdateTime='2026-09-18T10:00:00.5Z')]}]
         result = self.run_list(start_date=datetime.datetime(2026, 9, 18, tzinfo=datetime.timezone.utc))
         self.assertEqual([t['thread'] for t in result['threads']], [f'{SPACE}/threads/T1', f'{SPACE}/threads/T2'])
         self.assertEqual(result['threads'][0]['messages'], [
-            {'id': 'T1', 'sender': 'Husni', 'time': '2026-09-18T09:00:00Z', 'text': 'root'},
+            {'id': 'T1', 'root': True, 'sender': 'Husni', 'time': '2026-09-18T09:00:00Z', 'text': 'root'},
             {'id': 'T1.a', 'sender': 'Husni', 'time': '2026-09-18T09:00:00Z', 'edited': '2026-09-18T10:00:00Z',
              'text': 'reply'},
         ])
@@ -82,11 +83,17 @@ class ListSpaceMessagesTest(unittest.TestCase):
     def test_optional_fields_are_compacted(self):
         self.pages = [{'messages': [msg(
             'T1.b', quotedMessageMetadata={'name': f'{SPACE}/messages/T1.a'},
-            emojiReactionSummaries=[{'emoji': {'unicode': '👍'}, 'reactionCount': 2}],
+            threadReply=True,
+            emojiReactionSummaries=[
+                {'emoji': {'unicode': '👍'}, 'reactionCount': 2},
+                {'emoji': {'customEmoji': {'uid': 'u1', 'emojiName': ':shrek-scream:'}}, 'reactionCount': 3},
+                {'emoji': {'customEmoji': {'uid': 'u2', 'emojiName': ':party-parrot:'}}, 'reactionCount': 1},
+            ],
             clientAssignedMessageId=f'{google_chat.APP_MESSAGE_PREFIX}x')]}]
         m = self.run_list(limit=1)['threads'][0]['messages'][0]
         self.assertEqual((m['quoted'], m['reactions'], m['sender_type'], m['sent_by_app']),
-                         ('T1.a', {'👍': 2}, 'BOT', True))
+                         ('T1.a', {'👍': 2, ':shrek-scream:': 3, ':party-parrot:': 1}, 'BOT', True))
+        self.assertNotIn('root', m)
 
 
 if __name__ == '__main__':

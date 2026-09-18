@@ -420,6 +420,9 @@ def _compact_message(msg: Dict, creds: Credentials, space_name: str) -> Dict:
     """One message for grouped output: fields that are empty or implied by the group are left out."""
     prefix = f"{space_name}/messages/"
     out = {'id': msg.get('name', '').removeprefix(prefix)}
+    # A day-filtered group can start mid-thread, so the root is marked, not inferred.
+    if not msg.get('threadReply'):
+        out['root'] = True
     fields = _sender_fields(msg, creds)
     out['sender'] = fields['sender']
     if fields['sender_type'] != 'HUMAN':
@@ -440,8 +443,12 @@ def _compact_message(msg: Dict, creds: Credentials, space_name: str) -> Dict:
             for a in msg['attachment']
         ]
     if msg.get('emojiReactionSummaries'):
-        out['reactions'] = {r.get('emoji', {}).get('unicode', '?'): r.get('reactionCount', 0)
-                            for r in msg['emojiReactionSummaries']}
+        out['reactions'] = {}
+        for r in msg['emojiReactionSummaries']:
+            emoji = r.get('emoji', {})
+            custom = emoji.get('customEmoji', {})
+            key = emoji.get('unicode') or custom.get('emojiName') or custom.get('uid') or '?'
+            out['reactions'][key] = out['reactions'].get(key, 0) + r.get('reactionCount', 0)
     return out
 
 
