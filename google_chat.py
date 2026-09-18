@@ -11,6 +11,7 @@ os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
 import logging
 import datetime
 import json
+import random
 import re
 import uuid
 import urllib.parse
@@ -21,6 +22,10 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import AuthorizedSession, Request
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import HttpRequest
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -42,6 +47,49 @@ _user_display_name_cache: Dict[str, str] = {}
 # Cached API service objects (keyed by credentials token)
 _service_cache: Dict[str, object] = {}
 
+# Transient failures are retried with backoff. A 429 means Google did not process
+# the request, so any method may repeat it; a 5xx after a write may have taken
+# effect already (a second send would post twice), so only reads repeat on 5xx.
+# Google's per-space limit is about one write a second, so bursts do hit 429.
+RETRY_ATTEMPTS = 3
+RETRY_5XX = {500, 502, 503, 504}
+
+
+def _should_retry(method: str, status: int) -> bool:
+    return status == 429 or (status in RETRY_5XX and method.upper() == 'GET')
+
+
+def _retry_delay(attempt: int, retry_after: Optional[str] = None) -> float:
+    """Seconds before retry number attempt (0-based): Retry-After when sent, else 1, 2, 4 plus jitter."""
+    if retry_after and retry_after.isdigit():
+        return min(float(retry_after), 30.0)
+    return 2 ** attempt + random.uniform(0, 0.5)
+
+
+class _RetryingHttpRequest(HttpRequest):
+    """googleapiclient request whose execute() retries transient failures."""
+
+    def execute(self, http=None, num_retries=0):
+        for attempt in range(RETRY_ATTEMPTS + 1):
+            try:
+                return super().execute(http=http, num_retries=num_retries)
+            except HttpError as e:
+                if attempt == RETRY_ATTEMPTS or not _should_retry(self.method, e.resp.status):
+                    raise
+                delay = _retry_delay(attempt, e.resp.get('retry-after'))
+                logger.info("%s %s got %s; retrying in %.1fs", self.method, self.uri.split('?')[0], e.resp.status, delay)
+                time.sleep(delay)
+
+
+class _ChatRetry(Retry):
+    """urllib3 retry policy for the raw-HTTP calls, with the same rules."""
+
+    def is_retry(self, method, status_code, has_retry_after=False):
+        return bool(self.total) and _should_retry(method, status_code)
+
+    def get_backoff_time(self):
+        return _retry_delay(len(self.history) - 1)
+
 def _get_service(api: str, version: str, creds: Credentials) -> object:
     """Get or create a cached Google API service object."""
     cache_key = f"{api}:{version}:{creds.token}"
@@ -51,7 +99,7 @@ def _get_service(api: str, version: str, creds: Credentials) -> object:
         stale = [k for k in _service_cache if k.startswith(prefix) and k != cache_key]
         for k in stale:
             del _service_cache[k]
-        _service_cache[cache_key] = build(api, version, credentials=creds)
+        _service_cache[cache_key] = build(api, version, credentials=creds, requestBuilder=_RetryingHttpRequest)
     return _service_cache[cache_key]
 
 def _build_send_kwargs(space_name: str, body: Dict, thread_key: Optional[str] = None, thread_name: Optional[str] = None) -> Dict:
@@ -745,6 +793,11 @@ def _http(creds: Credentials) -> AuthorizedSession:
     session = getattr(_thread_local, 'session', None)
     if session is None or session.credentials is not creds:
         _thread_local.session = session = AuthorizedSession(creds)
+        # raise_on_status=False hands the last response back, so callers still
+        # see Google's error after the retries run out.
+        retry = _ChatRetry(total=RETRY_ATTEMPTS, connect=0, read=0, allowed_methods=None,
+                           raise_on_status=False, respect_retry_after_header=True)
+        session.mount('https://', HTTPAdapter(max_retries=retry))
     return session
 
 
