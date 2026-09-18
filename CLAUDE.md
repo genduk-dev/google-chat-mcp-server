@@ -1,36 +1,84 @@
-# CLAUDE.md
+# google-chat-mcp-server
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+An MCP server that gives agents Google Chat through the user's own OAuth
+sign-in, and optionally runs as a Claude Code channel. A personal fork of
+`chy168/google-chat-mcp-server`; `upstream` is fetch-only.
 
-## Project Overview
+## The map
 
-Personal fork of `chy168/google-chat-mcp-server`. Exposes Google Chat as MCP tools via OAuth2, allowing LLM clients to read, send, edit, delete, and react to messages.
+- `server.py`: every MCP tool and its docstring, the CLI flags, and
+  `run_channel`, which adds the channel's tools and its stdio relay.
+- `google_chat.py`: everything that talks to Google. Credentials, the Chat and
+  People API calls, retries, and the compact output the tools return.
+- `channel.py`: the channel. Watched spaces, the poller and its lease, the
+  cursors, follow-up threads, edits, and the permission relay.
+- `server_auth.py`, `auth_cli.py`: sign-in outside an agent, from upstream.
+- `tests/`: unit tests, no network.
+
+## Rules that are not visible in the code
+
+### Several server processes share one set of files
+
+Every Claude Code session runs its own server process, and they all use the
+files beside the token: `token.json`, the channel's state, cursors, lease and
+pending permission prompts, and `user_names.json`. Write them through
+`write_private` (a per-process temp file, 0600, atomic rename) and reread a
+file when it changes on disk. Never treat an in-memory copy as the truth: a
+session started before a re-login once wrote its old token back an hour later
+and dropped the new scopes.
+
+### The channel cannot tell whether it is a channel
+
+`--channel` starts the poller. Claude Code's
+`--dangerously-load-development-channels` is what makes a session listen, and
+its `initialize` is the same with or without it, so the server cannot detect a
+session that will drop its notifications. The lease is local files, so two
+machines both poll. Both are documented for the user in the README; do not
+build detection on a signal that does not exist.
+
+The poller blocks the event loop, like every tool call. Anything that can
+block for long (retries, big listings) has to stay under the lease's 60
+seconds, or a standby takes over.
+
+### A write that failed with a 5xx may have happened
+
+Retry a 429 for any method: Google did not process it. Retry a 5xx only for a
+read. In a burst test two of five writes that returned 503 had been posted.
+
+### Tool docstrings are the agent's interface
+
+The agent sees nothing but the docstrings and the output. A change to what a
+tool returns or accepts changes its docstring in the same commit. Output is
+compact JSON through `_json`, and optional fields appear only when set. This is
+a private tool, so breaking changes are fine; say so in the commit.
+
+### Text from Chat or from Claude Code is untrusted
+
+It reaches Chat inside code (backticks or a fence), where mention and link
+markup stays inert. Only senders on a space's allowlist reach the session or
+answer a permission prompt.
 
 ## Commands
 
-- **Run MCP server**: `uv run server.py`
-- **Auth (CLI)**: `uv run python server.py --auth cli`
-- **Auth (web)**: `uv run python server.py --auth web --port 8000`
-- **Debug**: `fastmcp dev server.py --with-editable .`
-- **Docker build**: `docker build -t google-chat-mcp-server:latest .`
+```sh
+uv sync
+timeout 120 uv run python -m unittest discover -s tests -t .
+uv run server.py --token-path PATH            # the plain server
+uv run server.py --token-path PATH --channel  # the channel
+```
 
-- **Run as Claude Code channel**: `uv run server.py --channel` (adds watch tools and pushes new messages from watched spaces)
-- **Tests**: `uv run python -m unittest discover -s tests -t .`
+## Testing against the live API
 
-## Architecture
+Unit tests mock Google. A change to an API call is not done until it has run
+against the real API through the MCP server, over stdio.
 
-Two runtime modes sharing a common Google Chat client:
-
-1. **MCP Server** (`server.py`) — FastMCP instance registering tools: `get_chat_spaces`, `get_space_messages`, `send_space_message`, `delete_space_message`, `get_message`, `search_messages`, `update_message`, `create_reaction`, `list_reactions`, `send_message_with_attachment`
-
-2. **Auth Server** (`server_auth.py`) — FastAPI OAuth2 web flow; also `auth_cli.py` for headless CLI auth
-
-**Core module**: `google_chat.py` — all Google Chat API + People API logic, credential management, member name prefetching, message filtering.
-
-## Key Details
-
-- Python 3.13, managed with `uv` and `hatchling` build backend
-- MCP framework: `fastmcp`
-- Auth credentials stored in `credentials.json` (GCP OAuth client secrets, not committed) and `token.json` (runtime, path configurable via `--token-path`)
-- `BOT_NAME` env var (default: `gchat-mcp`) is the bot identity. It sets the `clientAssignedMessageId` prefix `client-{BOT_NAME}-` used to tag and identify app-sent messages, and the `@{BOT_NAME}` mention for channel spaces watched with `mention_only`. Filtered read output attributes messages carrying the prefix to `BOT_NAME` (as written) with `sender_type` `BOT`, since Google reports them as the user. The channel uses the prefix to drop its own replies, so every process sharing a space must use the same value. The server refuses to start unless the lowercased name is 1-43 letters, digits, or hyphens, which keeps the ID within Google Chat's `client-` / lowercase / 63-character rules
-- `--raw-messages` flag disables field filtering (returns full API responses); filtered by default to save tokens
+- **The channel:** read its stdout raw. The MCP client SDK drops
+  `notifications/claude/channel`, so a test through it never sees a delivery.
+- **Keep the live channel out of it:** use a temporary `--channel-state-path`
+  and another `BOT_NAME` (for example `gendukt`), so the user's running
+  channel session neither reacts nor loses its lease.
+- **Leave nothing behind:** delete test messages and threads. Record status,
+  notification or read state before changing it, and put back exactly what was
+  there.
+- **Ask first** before anything another person would see: a message in a
+  shared space, a created space, an invitation.

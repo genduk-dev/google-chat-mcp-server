@@ -1,168 +1,154 @@
-# Google Chat MCP Server (Personal Fork)
+# Google Chat MCP Server
 
-> **Fork of [chy168/google-chat-mcp-server](https://github.com/chy168/google-chat-mcp-server)** with additional features for richer Google Chat interaction via MCP.
+Google Chat for Claude Code and other MCP clients, signed in as you.
 
-A Python MCP server that exposes Google Chat as tools for LLM clients. Read, send, edit, delete, and react to messages — all through the Model Context Protocol.
+A personal fork of [chy168/google-chat-mcp-server](https://github.com/chy168/google-chat-mcp-server).
+It talks to the Google Chat API with your own OAuth sign-in, so an agent reads
+and writes Chat the way you do: your spaces, your DMs, your name on what it
+sends. It can also run as a Claude Code channel, which pushes the messages you
+send in Chat into a Claude Code session and relays its permission prompts back.
 
-## Fork Additions
+## What it does
 
-- **Full message CRUD** — send, get, update, and delete messages
-- **Thread replies** — reply via `thread_key` (bot-initiated) or `thread_name` (existing thread)
-- **Emoji reactions** — create and list reactions on messages
-- **File link attachments** — send messages with clickable file links
-- **Smart name resolution** — bulk People API prefetch for display names
-- **App message tagging** — `clientAssignedMessageId` prefix to identify app-sent messages (derived from the `BOT_NAME` env var)
-- **Token-saving mode** — filtered message output by default; use `--raw-messages` for full API response
-- **CLI auth** — headless OAuth flow for remote/SSH environments
+- **Reads conversations cheaply.** Messages come grouped by thread, with only
+  the fields that are set, and a whole thread comes back in one request however
+  old its first message is.
+- **Finds what you have not read.** Unread spaces and their unread messages,
+  from your real read state, and marks them read when asked.
+- **Sends like you would.** Markdown links and bold turn into Chat's own
+  formatting, messages can go to a thread or quote another, and files attach.
+- **Links back into Chat.** Spaces, DMs, threads, search results and pins carry
+  a link that opens them in the Chat app.
+- **Covers the rest of Chat.** Search, reactions (custom emoji too), pins,
+  members, group chat lookup, space creation, edit and delete history, your
+  own status and do-not-disturb, and a space's notification setting.
+- **Names people Google cannot.** A deleted or hidden account shows as
+  `users/ID`; tell the agent who it is and every later read shows the name.
+- **Runs as a Claude Code channel.** `@mention` the bot in a watched space and
+  the message reaches the session; replies in that thread follow without the
+  mention. Tool permission prompts show up in the thread and take `yes <id>` or
+  `no <id>`.
 
 ## Requirements
 
-- Python 3.13
-- [uv](https://docs.astral.sh/uv/) package manager
-- Google Cloud project with these APIs enabled:
-  - [Google Chat API](https://console.cloud.google.com/apis/library/chat.googleapis.com)
-  - [People API](https://console.cloud.google.com/apis/library/people.googleapis.com)
-- OAuth2 client credentials (`credentials.json`) from [Google Cloud Console](https://console.cloud.google.com/auth/clients)
+- **Python 3.13 and [uv](https://docs.astral.sh/uv/).**
+- **A Google Cloud project** with the
+  [Chat API](https://console.cloud.google.com/apis/library/chat.googleapis.com)
+  and the [People API](https://console.cloud.google.com/apis/library/people.googleapis.com)
+  enabled, and an OAuth consent screen. An Internal consent screen, available in
+  a Workspace organization, needs no Google verification for these scopes.
+- **An OAuth client of type Desktop app.** Download its JSON as
+  `credentials.json`. Sign-in redirects to a random loopback port, which only a
+  Desktop client accepts.
 
-## Setup
+## Install
 
-### 1. Clone and install
-
-```bash
+```sh
 git clone https://github.com/genduk-dev/google-chat-mcp-server.git
 cd google-chat-mcp-server
 uv sync
 ```
 
-### 2. Create OAuth credentials
+Pick a directory for the credentials, for example
+`~/.config/google-chat-mcp/`, and put `credentials.json` there. The token is
+written beside it.
 
-1. Go to [Google Cloud Console > Auth Platform > Clients](https://console.cloud.google.com/auth/clients)
-2. Create a **Web application** client ([reference](https://developers.google.com/identity/protocols/oauth2/?hl=en))
-3. Add authorized JavaScript origin: `http://localhost:8000`
-4. Add authorized redirect URI: `http://localhost:8000/auth/callback`
-5. Download the client secrets JSON and save as `credentials.json` in the project root
+## Use it from Claude Code
 
-### 3. Authenticate
-
-**CLI mode** (recommended for headless/remote environments):
-```bash
-uv run python server.py --auth cli
-```
-Follow the prompts — open the URL in any browser, complete authorization, paste the redirect URL back.
-
-**Web mode** (local browser available):
-```bash
-uv run python server.py --auth web --port 8000
-```
-Open `http://localhost:8000/auth` and complete the Google login flow.
-
-Both modes save the token to `token.json` (configurable via `--token-path`).
-
-## MCP Client Configuration
+Add the server to your MCP config (`~/.mcp.json` or a project `.mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "google_chat": {
+    "GoogleChat": {
       "command": "uv",
-      "args": [
-        "--directory", "/path/to/google-chat-mcp-server",
-        "run", "server.py",
-        "--token-path", "/path/to/google-chat-mcp-server/token.json"
-      ]
+      "args": ["run", "--directory", "/path/to/google-chat-mcp-server", "server.py",
+               "--token-path", "/path/to/credentials-dir/token.json"],
+      "env": {"BOT_NAME": "Genduk"}
     }
   }
 }
 ```
 
-## Tools
+Then ask the agent to sign in. Its `authenticate` tool returns a Google link;
+open it, allow access, and the token is saved on its own. Only when the browser
+runs on another machine does the redirect fail to load; give the agent that
+page's address and it finishes with `complete_authentication`. Without an
+agent, `uv run python server.py --auth cli` does the same in a terminal.
 
-| Tool | Description |
-|------|-------------|
-| `get_chat_spaces()` | List all accessible Google Chat spaces |
-| `get_space_members(space_name)` | List members with user IDs, display names, and mention syntax |
-| `get_space_messages(space_name, start_date, end_date?)` | List messages with date filtering (YYYY-MM-DD) |
-| `get_message(message_name)` | Fetch a single message by resource name |
-| `search_messages(query, space_name?, limit?, page_token?)` | Full-text search across all spaces (or one). Returns `{messages, nextPageToken}`; pass the token back to page forward |
-| `send_space_message(space_name, text, thread_key?, thread_name?)` | Send a message, optionally in a thread |
-| `update_message(message_name, text)` | Edit a message's text |
-| `delete_space_message(message_name)` | Delete a message |
-| `create_reaction(message_name, emoji_unicode)` | Add an emoji reaction |
-| `list_reactions(message_name)` | List all reactions on a message |
-| `send_message_with_attachment(space_name, text, file_url, ...)` | Send a message with a file link |
+Every server process shares the token file, so signing in once covers all of
+your sessions, and a later sign-in reaches running ones without a restart.
 
-> **Note:** `search_messages` uses the Chat API's `spaces.messages.search` endpoint,
-> which is in Google Workspace Developer Preview. It works with the existing
-> `chat.messages` scope and needs no re-auth, but Google may change or withdraw it.
-> If that happens the tool raises a clear error and every other tool keeps working.
+`BOT_NAME` (default `gchat-mcp`) is the name the bot answers to: messages it
+sends are tagged with it and read back as sent by that name, and a
+mention-only channel space reacts to `@BOT_NAME`. Use the same value in every
+config that shares a space.
 
-**Mentions:** To mention a user in message text, use `<users/USER_ID>`. Use `get_space_members()` to look up IDs. Use `<users/all>` to mention everyone.
+## Run it as a channel
 
-Resource name formats:
-- Space: `spaces/SPACE_ID`
-- Message: `spaces/SPACE_ID/messages/MESSAGE_ID`
-- Thread: `spaces/SPACE_ID/threads/THREAD_ID`
+A channel is a second config with `--channel`, for example
+`~/.config/claude/gchat-channel.json`:
 
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BOT_NAME` | `gchat-mcp` | Bot identity. App-sent messages get the `clientAssignedMessageId` prefix `client-{BOT_NAME}-`, and channel spaces watched with `mention_only` react to `@{BOT_NAME}` (case-insensitive). Read tools report those messages with `sender` set to `BOT_NAME` as written and `sender_type` `BOT`; `--raw-messages` keeps Google's own sender. Lowercased, then limited to 1-43 letters, digits, or hyphens so the ID stays valid for Google Chat |
-
-## Docker
-
-### Build image
-```bash
-docker build -t google-chat-mcp-server:latest .
+```json
+{
+  "mcpServers": {
+    "gchat-channel": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/google-chat-mcp-server", "server.py",
+               "--token-path", "/path/to/credentials-dir/token.json", "--channel"],
+      "env": {"BOT_NAME": "Genduk"}
+    }
+  }
+}
 ```
 
-### Run MCP server
-```bash
-docker run -it --rm \
-  -v /path/to/project:/data \
-  google-chat-mcp-server:latest \
-  --token-path=/data/token.json
+Start the session with both the config and Claude Code's channel flag:
+
+```sh
+claude --mcp-config ~/.config/claude/gchat-channel.json \
+  --dangerously-load-development-channels server:gchat-channel
 ```
 
-### Run auth server in container
+Then ask it to watch a space (`watch_space`, optionally `mention_only`).
 
-> **Note:** `credentials.json` must be accessible inside the container at `/app/credentials.json`.
+**Always start that config with the flag, and on one machine only.**
 
-```bash
-# Web mode
-docker run -it --rm \
-  -p 8000:8000 \
-  -v /path/to/project/credentials.json:/app/credentials.json:ro \
-  -v /path/to/project:/data \
-  google-chat-mcp-server:latest \
-  --auth web --host 0.0.0.0 --port 8000 --token-path=/data/token.json
+- `--channel` is what starts the poller. The Claude Code flag is what makes
+  the session listen. Started without the flag, the poller still runs and
+  still claims the space, but Claude Code drops every message, so a real
+  channel session on the same machine waits unused while your messages go
+  nowhere. The server cannot tell the difference.
+- Several channel sessions on one machine are safe: one polls, the others
+  stand by, and one takes over if the poller exits or hangs. That handover
+  goes through files on the machine, so channel sessions on two machines both
+  poll and both answer.
 
-# CLI mode
-docker run -it --rm \
-  -v /path/to/project/credentials.json:/app/credentials.json:ro \
-  -v /path/to/project:/data \
-  google-chat-mcp-server:latest \
-  --auth cli --token-path=/data/token.json
-```
+The plain config never polls; any number of normal sessions can use it.
 
-## Development
+## Learn more
 
-```bash
-# Run MCP server directly
-uv run server.py
+| If you want to | Read |
+|---|---|
+| Know what each tool does | The tool descriptions, which the agent reads (`server.py`) |
+| Work on the code | [CLAUDE.md](CLAUDE.md) |
+| Know how Claude Code channels work | [Channels reference](https://code.claude.com/docs/en/channels-reference) |
 
-# Debug with FastMCP inspector
-fastmcp dev server.py --with-editable .
+## If you are an AI agent helping someone with this server
 
-# Raw API output (no field filtering)
-uv run server.py --raw-messages
-```
+- **Setting it up:** follow Install and Use it from Claude Code above. The
+  OAuth client must be a Desktop app, and `credentials.json` sits beside the
+  token path.
+- **A tool says to authenticate:** call `authenticate`, give the person the
+  link, and wait; the token lands by itself.
+- **A sender shows as `users/ID`:** ask the person who it is, showing the
+  message and its link, and save the answer with `set_user_name`.
+- **Starting a channel session:** use the channel config together with
+  `--dangerously-load-development-channels`, never one without the other.
+- **Ask the person first** before sending, editing or deleting in someone
+  else's space, creating a space, changing their status, or marking spaces
+  read.
+- **Changing the code:** read [CLAUDE.md](CLAUDE.md).
 
-## Architecture
+## License
 
-```
-server.py          — FastMCP entry point, registers all MCP tools
-google_chat.py     — Google Chat API + People API client, credential management
-server_auth.py     — FastAPI OAuth2 web auth server
-auth_cli.py        — Headless CLI OAuth flow
-```
+MIT, as upstream; see [LICENSE](LICENSE).
