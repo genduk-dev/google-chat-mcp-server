@@ -28,7 +28,7 @@ from mcp.shared.message import SessionMessage
 
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text,
                          self_user_id, send_space_message, update_message, write_private, _get_service,
-                         _parse_time)
+                         _event_payloads, _parse_time)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,9 @@ INSTRUCTIONS = (
     'the reply to arrive as a channel message; do not use AskUserQuestion, which only the '
     'terminal can answer. In a mention_only space, replies in a thread you are part of arrive '
     f'without @{BOT_NAME} for 30 minutes after its last message; elsewhere they need the mention. '
-    'Tool permission prompts are relayed to that thread automatically.'
+    'Tool permission prompts are relayed to that thread automatically. A message the operator '
+    'edited arrives again with edited="true" and the same message_name; treat it as a correction '
+    'of the earlier version, or as a new request if the edit added the mention.'
 )
 
 # A takeover resumes from saved cursors only if the previous poller saved them
@@ -157,7 +159,7 @@ def permission_prompt(params: Dict) -> str:
             f"Reply `yes {rid}` to allow or `no {rid}` to deny.")
 
 
-def to_notification(msg: Dict, space_name: str, sender_name: str) -> Dict:
+def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool = False) -> Dict:
     """Build notification params. Meta keys must be identifiers or Claude Code drops them."""
     meta = {
         'chat_id': space_name,
@@ -167,6 +169,9 @@ def to_notification(msg: Dict, space_name: str, sender_name: str) -> Dict:
         'sender_name': sender_name,
         'ts': msg.get('createTime', ''),
     }
+    if edited:
+        meta['edited'] = 'true'
+        meta['edited_at'] = msg.get('lastUpdateTime', '')
     content = message_text(msg)
     names = [a.get('contentName') for a in msg.get('attachment', []) if a.get('contentName')]
     if names:
@@ -193,9 +198,11 @@ class Channel:
         # Per-space cursor: only messages created after it are delivered, so
         # watching a space never replays history.
         self.cursors: Dict[str, str] = {}
-        self._saved_cursors: Optional[Tuple[Dict, Dict]] = None  # last written (cursors, threads)
+        self._saved_cursors: Optional[Tuple[Dict, Dict, Dict]] = None  # last written (cursors, threads, edits)
         # thread name -> createTime of the last message delivered or sent by us there
         self.active_threads: Dict[str, str] = {}
+        # Per-space time of the last message.updated event seen, for edit delivery.
+        self.edit_cursors: Dict[str, str] = {}
         self._saved_at: Optional[datetime.datetime] = None
         self._token = uuid.uuid4().hex
         self.active = False
@@ -261,7 +268,7 @@ class Channel:
     def _resume_cursors(self) -> None:
         # Cursors a standby set in watch() may be hours old; the previous poller's
         # saved ones are authoritative, and a space without one starts from now.
-        self.cursors, self.active_threads = {}, {}
+        self.cursors, self.active_threads, self.edit_cursors = {}, {}, {}
         if not self.cursor_path.exists():
             return
         saved = json.loads(self.cursor_path.read_text())
@@ -270,17 +277,19 @@ class Channel:
         if saved_at and datetime.datetime.fromisoformat(saved_at) >= cutoff:
             self.cursors.update(saved.get('cursors', {}))
             self.active_threads.update(saved.get('threads', {}))
+            self.edit_cursors.update(saved.get('edits', {}))
 
     def _save_cursors(self) -> None:
         cursors = {s: ts for s, ts in self.cursors.items() if s in self.store.load()}
         now = datetime.datetime.now(datetime.timezone.utc)
         self.active_threads = {t: ts for t, ts in self.active_threads.items()
                                if now - _parse_time(ts) < FOLLOWUP_WINDOW}
-        state = (cursors, dict(self.active_threads))
+        edits = {s: ts for s, ts in self.edit_cursors.items() if s in cursors}
+        state = (cursors, dict(self.active_threads), edits)
         if state == self._saved_cursors and self._saved_at and now - self._saved_at < CURSOR_HEARTBEAT:
             return
         write_private(self.cursor_path, json.dumps(
-            {'saved_at': now.isoformat(), 'cursors': cursors, 'threads': self.active_threads}))
+            {'saved_at': now.isoformat(), 'cursors': cursors, 'threads': self.active_threads, 'edits': edits}))
         self._saved_cursors, self._saved_at = state, now
 
     @contextlib.contextmanager
@@ -402,8 +411,9 @@ class Channel:
         self._answered: List[Tuple[str, str, str, str]] = []
         for space_name, config in spaces.items():
             if space_name not in self.cursors:
-                self.cursors[space_name] = self._now()
+                self.cursors[space_name] = self.edit_cursors[space_name] = self._now()
                 continue
+            listed_after = self.cursors[space_name]
             try:
                 response = chat.spaces().messages().list(
                     parent=space_name, pageSize=100, orderBy='createTime ASC',
@@ -431,6 +441,46 @@ class Channel:
                 self.active_threads[thread] = msg['createTime']
                 sender_name = get_user_display_name(msg.get('sender', {}), creds)
                 out.append(to_notification(msg, space_name, sender_name))
+            out.extend(self._poll_edits(chat, creds, space_name, config, listed_after))
+        return out
+
+    def _poll_edits(self, chat, creds, space_name: str, config: Dict, listed_after: str) -> List[Dict]:
+        """Edited messages that pass the same gate as new ones, marked edited.
+
+        messages.list cannot filter on edit time, so edits come from spaceEvents.
+        """
+        since = self.edit_cursors.setdefault(space_name, self._now())
+        out, page_token = [], None
+        try:
+            while True:
+                args = {'parent': space_name, 'pageSize': 100,
+                        'filter': f'start_time="{since}" AND event_types:"google.workspace.chat.message.v1.updated"'}
+                if page_token:
+                    args['pageToken'] = page_token
+                response = chat.spaces().spaceEvents().list(**args).execute()
+                for event in response.get('spaceEvents', []):
+                    self.edit_cursors[space_name] = event['eventTime']
+                    for payload in _event_payloads(event):
+                        msg = payload.get('message', {})
+                        if msg.get('deleteTime') or not msg.get('lastUpdateTime'):
+                            continue
+                        if msg['createTime'] > listed_after:
+                            continue  # listed in this poll already, in its edited form
+                        if msg.get('clientAssignedMessageId', '').startswith(APP_MESSAGE_PREFIX):
+                            continue  # Claude's own edits, including answered permission prompts
+                        thread = msg.get('thread', {}).get('name', '')
+                        mention_only = config['mention_only'] and not self._in_followup(thread, msg['lastUpdateTime'])
+                        if not should_deliver(msg, config['allowed_senders'], mention_only):
+                            continue
+                        self.active_threads[thread] = msg['lastUpdateTime']
+                        sender_name = get_user_display_name(msg.get('sender', {}), creds)
+                        out.append(to_notification(msg, space_name, sender_name, edited=True))
+                page_token = response.get('nextPageToken')
+                if not page_token:
+                    break
+        except Exception:
+            # edit_cursors keeps the last event handled, so the next poll resumes after it.
+            logger.exception("Polling edits in %s failed", space_name)
         return out
 
     async def run(self, write_stream, initialized: anyio.Event) -> None:

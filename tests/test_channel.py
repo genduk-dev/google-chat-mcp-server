@@ -115,9 +115,13 @@ class PollTest(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
+        self.events([])
 
     def tearDown(self):
         self.dir.cleanup()
+
+    def events(self, events):
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {'spaceEvents': events}
 
     def list_returns(self, messages):
         self.chat.spaces().messages().list.return_value.execute.return_value = {'messages': messages}
@@ -176,6 +180,50 @@ class PollTest(unittest.TestCase):
         ])
         self.assertEqual([n['content'] for n in ch.poll_once()],
                          ['@genduk check the deploy', 'the staging one', 'thanks, one more'])
+
+    @staticmethod
+    def edit_event(msg, time):
+        return {'eventTime': time, 'eventType': 'google.workspace.chat.message.v1.updated',
+                'messageUpdatedEventData': {'message': msg}}
+
+    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
+    def test_edits_pass_the_same_gate_and_arrive_marked_edited(self):
+        self.store.save({SPACE: {'allowed_senders': [OWNER], 'mention_only': True}})
+        ch = Channel(self.store, 5)
+        ch.cursors[SPACE] = ch.edit_cursors[SPACE] = '2026-09-18T06:00:00Z'
+        self.list_returns([])
+        added = self.threaded('m1', 'A', '@genduk deploy staging', '2026-09-18T05:00:00Z', )
+        added['lastUpdateTime'] = '2026-09-18T06:00:05Z'
+        plain = self.threaded('m2', 'B', 'still no mention', '2026-09-18T05:00:00Z')
+        plain['lastUpdateTime'] = '2026-09-18T06:00:06Z'
+        ours = self.threaded('m3', 'C', '@genduk prompt *Allowed*', '2026-09-18T05:00:00Z',
+                             client_id=f'{APP_MESSAGE_PREFIX}p')
+        ours['lastUpdateTime'] = '2026-09-18T06:00:07Z'
+        gone = dict(added, name=f'{SPACE}/messages/m4', deleteTime='2026-09-18T06:00:08Z')
+        self.events([self.edit_event(m, m['lastUpdateTime']) for m in (added, plain, ours)] +
+                    [self.edit_event(gone, '2026-09-18T06:00:08Z')])
+        out = ch.poll_once()
+        self.assertEqual([(n['content'], n['meta']['edited'], n['meta']['edited_at']) for n in out],
+                         [('@genduk deploy staging', 'true', '2026-09-18T06:00:05Z')])
+        self.assertEqual(ch.edit_cursors[SPACE], '2026-09-18T06:00:08Z')
+        kwargs = self.chat.spaces().spaceEvents().list.call_args.kwargs
+        self.assertIn('start_time="2026-09-18T06:00:00Z"', kwargs['filter'])
+
+    def test_a_message_created_and_edited_between_polls_is_delivered_once(self):
+        ch = Channel(self.store, 5)
+        ch.cursors[SPACE] = ch.edit_cursors[SPACE] = '2026-09-18T06:00:00Z'
+        fresh = message('m1', text='edited already', create_time='2026-09-18T06:00:01Z')
+        fresh['lastUpdateTime'] = '2026-09-18T06:00:02Z'
+        self.list_returns([fresh])
+        self.events([self.edit_event(fresh, '2026-09-18T06:00:02Z')])
+        self.assertEqual([n['content'] for n in ch.poll_once()], ['edited already'])
+
+    def test_first_poll_starts_edit_tracking_from_now(self):
+        ch = Channel(self.store, 5)
+        self.list_returns([])
+        ch.poll_once()
+        self.assertIn(SPACE, ch.edit_cursors)
+        self.chat.spaces().spaceEvents().list.assert_not_called()
 
     def test_active_threads_survive_a_takeover(self):
         ch = Channel(self.store, 5)
@@ -322,6 +370,7 @@ class PermissionRelayTest(unittest.TestCase):
         chat = mock.MagicMock()
         chat.spaces().messages().list.return_value.execute.return_value = {'messages': [
             message('m1', text='yes abcde', create_time='2026-09-18T06:00:01Z')]}
+        chat.spaces().spaceEvents().list.return_value.execute.return_value = {}
         with mock.patch.object(channel, 'get_credentials', return_value=object()), \
                 mock.patch.object(channel, '_get_service', return_value=chat), \
                 mock.patch.object(channel, 'get_user_display_name', return_value='Husni'):
