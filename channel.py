@@ -3,8 +3,14 @@
 Runs only when server.py is started with --channel. Watched spaces, their
 sender allowlists and whether they require an @BOT_NAME mention live in a JSON state file, so the watch tools take effect
 on the next poll without a restart.
+
+Every channel session on the machine shares that state, so only the process
+holding an flock on channel.lock polls; the others stand by and take over when
+it exits. The holder persists its cursors, so a takeover resumes where the
+previous poller stopped instead of skipping the gap.
 """
 import datetime
+import fcntl
 import json
 import logging
 import os
@@ -29,8 +35,15 @@ INSTRUCTIONS = (
     'Google Chat, not only in the terminal: call send_message with space_name set to chat_id and '
     'thread_name set to thread_name from the tag. Manage which spaces are watched with '
     'watch_space, unwatch_space and list_watched_spaces. A space watched with mention_only '
-    f'delivers only messages that mention @{BOT_NAME}.'
+    f'delivers only messages that mention @{BOT_NAME}. If a message depends on earlier '
+    'conversation you have not seen, read its thread first with get_messages(space_name=chat_id, '
+    'thread_name=thread_name).'
 )
+
+# A takeover resumes from saved cursors only if they are this fresh. Older ones
+# mean no channel session was running, and replaying that backlog would flood
+# the new session with messages nobody asked it to handle.
+RESUME_WINDOW = datetime.timedelta(minutes=10)
 
 
 class ChannelStore:
@@ -98,10 +111,63 @@ class Channel:
     def __init__(self, store: ChannelStore, poll_seconds: float):
         self.store = store
         self.poll_seconds = poll_seconds
+        self.lock_path = store.path.with_name('channel.lock')
+        self.cursor_path = store.path.with_name('channel_cursors.json')
         # Per-space cursor: only messages created after it are delivered, so
-        # watching a space or restarting never replays history.
+        # watching a space never replays history.
         self.cursors: Dict[str, str] = {}
+        self._saved_cursors: Dict[str, str] = {}
+        self._lock_fd: Optional[int] = None
         self._self_id: Optional[str] = None
+
+    def try_acquire(self) -> bool:
+        """Become the poller if no other process is. The kernel drops the lock when this process exits."""
+        if self._lock_fd is not None:
+            return True
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return False
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+        self._lock_fd = fd
+        self._resume_cursors()
+        return True
+
+    def _resume_cursors(self) -> None:
+        if not self.cursor_path.exists():
+            return
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - RESUME_WINDOW
+        for space, ts in json.loads(self.cursor_path.read_text()).items():
+            if datetime.datetime.fromisoformat(ts) >= cutoff:
+                self.cursors[space] = ts
+
+    def _save_cursors(self) -> None:
+        cursors = {s: ts for s, ts in self.cursors.items() if s in self.store.load()}
+        if cursors == self._saved_cursors:
+            return
+        tmp = self.cursor_path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(cursors))
+        os.chmod(tmp, 0o600)
+        tmp.replace(self.cursor_path)
+        self._saved_cursors = cursors
+
+    def poller_status(self) -> Dict:
+        if self._lock_fd is not None:
+            return {'active_here': True, 'holder_pid': os.getpid()}
+        pid = None
+        if self.lock_path.exists():
+            text = self.lock_path.read_text().strip()
+            pid = int(text) if text.isdigit() else None
+        if pid is not None:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pid = None  # stale: the holder exited and nobody has taken over yet
+        return {'active_here': False, 'holder_pid': pid}
 
     def _now(self) -> str:
         return datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -142,6 +208,7 @@ class Channel:
         # changed only by restarting every server that shares the spaces.
         return {'bot_name': BOT_NAME, 'mention': f'@{BOT_NAME}',
                 'message_id_prefix': APP_MESSAGE_PREFIX,
+                'poller': self.poller_status(),
                 'spaces': [{'space_name': s, **config} for s, config in self.store.load().items()]}
 
     def poll_once(self) -> List[Dict]:
@@ -179,10 +246,12 @@ class Channel:
                 # Blocks the event loop like every tool call here does. A worker
                 # thread would share the cached httplib2 clients with tool calls,
                 # and httplib2 is not thread-safe.
-                for params in self.poll_once():
-                    notification = types.JSONRPCNotification(
-                        jsonrpc='2.0', method=CHANNEL_METHOD, params=params)
-                    await write_stream.send(SessionMessage(types.JSONRPCMessage(notification)))
+                if self.try_acquire():
+                    for params in self.poll_once():
+                        notification = types.JSONRPCNotification(
+                            jsonrpc='2.0', method=CHANNEL_METHOD, params=params)
+                        await write_stream.send(SessionMessage(types.JSONRPCMessage(notification)))
+                    self._save_cursors()
             except Exception:
                 # Missing credentials or a failed state read must not kill the MCP server.
                 logger.exception("Google Chat channel poll failed")
