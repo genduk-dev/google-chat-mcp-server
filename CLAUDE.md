@@ -14,7 +14,8 @@ Personal fork of `chy168/google-chat-mcp-server`. Exposes Google Chat as MCP too
 - **Debug**: `fastmcp dev server.py --with-editable .`
 - **Docker build**: `docker build -t google-chat-mcp-server:latest .`
 
-No test suite exists yet (tests/ directory is empty).
+- **Run as Claude Code channel**: `uv run server.py --channel` (adds watch tools and pushes new messages from watched spaces)
+- **Tests**: `uv run python -m unittest discover -s tests -t .`
 
 ## Architecture
 

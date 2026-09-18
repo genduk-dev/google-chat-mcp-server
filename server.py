@@ -280,6 +280,58 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
     from google_chat import download_attachment as _download
     return await _download(resource_name, save_dir, content_name)
 
+def run_channel(args) -> None:
+    """Serve the normal tools plus the channel capability, watch tools, and poller."""
+    from pathlib import Path
+    import anyio
+    from mcp.server.stdio import stdio_server
+    from channel import Channel, ChannelStore, INSTRUCTIONS
+
+    state_path = Path(args.channel_state_path or Path(args.token_path).parent / 'channel_state.json')
+    channel = Channel(ChannelStore(state_path), args.poll_seconds)
+
+    def watch_space(space_name: str, allowed_senders: List[str] = None) -> Dict:
+        """Start pushing new messages from a Google Chat space into this Claude Code session.
+
+        Only messages from allowed_senders are delivered. When omitted, only the
+        authenticated user is allowed. Takes effect on the next poll; history
+        before this call is never replayed.
+
+        Args:
+            space_name: The space to watch (format: 'spaces/SPACE_ID')
+            allowed_senders: Optional list of 'users/USER_ID' whose messages are delivered
+        """
+        return channel.watch(space_name, allowed_senders)
+
+    def unwatch_space(space_name: str) -> Dict:
+        """Stop pushing messages from a Google Chat space into this session.
+
+        Args:
+            space_name: The space to stop watching (format: 'spaces/SPACE_ID')
+        """
+        return channel.unwatch(space_name)
+
+    def list_watched_spaces() -> Dict:
+        """List the watched Google Chat spaces and the senders allowed through for each."""
+        return channel.list_watched()
+
+    for fn in (watch_space, unwatch_space, list_watched_spaces):
+        mcp.add_tool(fn)
+
+    server = mcp._mcp_server
+    server.instructions = INSTRUCTIONS
+    options = server.create_initialization_options(
+        experimental_capabilities={'claude/channel': {}})
+
+    async def main():
+        async with stdio_server() as (read_stream, write_stream):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(channel.run, write_stream)
+                await server.run(read_stream, write_stream, options)
+                tg.cancel_scope.cancel()
+
+    anyio.run(main)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MCP Server with Google Chat Authentication')
     parser.add_argument('--auth', choices=['web', 'cli'],
@@ -288,6 +340,9 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=8000, help='Port to run the auth server on (default: 8000)')
     parser.add_argument('--token-path', default='token.json', help='Path to store OAuth token (default: token.json)')
     parser.add_argument('--raw-messages', action='store_true', help='Return raw API messages without filtering fields (filtered by default)')
+    parser.add_argument('--channel', action='store_true', help='Run as a Claude Code channel: push new messages from watched spaces into the session')
+    parser.add_argument('--channel-state-path', help='Where watched spaces are stored (default: channel_state.json next to the token)')
+    parser.add_argument('--poll-seconds', type=float, default=5.0, help='Channel poll interval in seconds (default: 5)')
 
     args = parser.parse_args()
 
@@ -310,5 +365,7 @@ if __name__ == "__main__":
         run_auth_server(port=args.port, host=args.host)
     elif args.auth == 'cli':
         run_cli_auth()
+    elif args.channel:
+        run_channel(args)
     else:
         mcp.run()
