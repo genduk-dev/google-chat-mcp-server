@@ -363,6 +363,47 @@ def prefetch_space_members(space_name: str, creds: Credentials) -> List[Dict]:
     return memberships
 
 
+# Names the user gave for people Google cannot name (deleted or hidden
+# accounts), as {users/ID: name}. Shared by every server process, so it is
+# reread whenever the file changes.
+_user_names: Dict[str, str] = {}
+_user_names_mtime: Optional[int] = None
+
+
+def _user_names_path() -> Path:
+    return Path(token_info['token_path']).parent / 'user_names.json'
+
+
+def user_names() -> Dict[str, str]:
+    global _user_names, _user_names_mtime
+    path = _user_names_path()
+    mtime = path.stat().st_mtime_ns if path.exists() else None
+    if mtime != _user_names_mtime:
+        new = json.loads(path.read_text()) if mtime is not None else {}
+        # Forget names worked out under the old mapping: saved ones that changed
+        # or went away, and IDs that stood in for a name that may now exist.
+        stale = set(_user_names) | set(new) | {u for u, n in _user_display_name_cache.items() if n == u}
+        for user_id in stale:
+            _user_display_name_cache.pop(user_id, None)
+        _user_names, _user_names_mtime = new, mtime
+    return _user_names
+
+
+def set_user_name(user_id: str, name: str) -> Dict:
+    """Save (or, with an empty name, remove) the name shown for a user Google cannot name."""
+    if not re.fullmatch(r'users/[0-9]+', user_id):
+        raise ValueError(f"Expected 'users/NUMERIC_ID', got {user_id!r}")
+    names = dict(user_names())
+    name = name.strip()
+    if name:
+        names[user_id] = name
+    else:
+        names.pop(user_id, None)
+    write_private(_user_names_path(), json.dumps(names, indent=2, ensure_ascii=False))
+    _user_display_name_cache.pop(user_id, None)
+    return {'user_id': user_id, 'name': name or None, 'saved_names': len(names)}
+
+
 def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     """Get user display name with caching.
 
@@ -378,6 +419,7 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     """
     user_id = sender.get('name', '')
     sender_type = sender.get('type', 'HUMAN')
+    saved = user_names()
 
     # Check if already cached (from prefetch_space_members)
     if user_id in _user_display_name_cache:
@@ -387,6 +429,11 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     if sender.get('displayName'):
         _user_display_name_cache[user_id] = sender['displayName']
         return sender['displayName']
+
+    # A name the user gave for someone Google cannot name.
+    if user_id in saved:
+        _user_display_name_cache[user_id] = saved[user_id]
+        return saved[user_id]
 
     # For BOT type, extract short ID
     if sender_type == 'BOT':

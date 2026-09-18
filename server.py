@@ -59,6 +59,10 @@ async def get_messages(space_name: str,
          "more": true,        # with limit: older matching messages exist beyond it
          "truncated": true}   # only when more than 1000 messages matched
     Threads are ordered by their first returned message, messages oldest first.
+    A sender shown as "users/ID" has no name Google can give (a deleted or hidden account).
+    When such a message matters to the task, show the user its text, space and link
+    (https://chat.google.com/room/SPACE_ID/THREAD_ID/MESSAGE_ID) and ask who wrote it; if
+    they know, save it with set_user_name so later reads show the name.
     A message's full name is "{space}/messages/{id}"; use it for get_message, reactions,
     quote replies and attachments. Pass a group's "thread" as send_message's thread_name
     to reply in it. Optional message fields appear only when set: sender_type (when not
@@ -128,6 +132,7 @@ async def get_unread_messages(space_name: str, limit: int = 50) -> str:
 
     Returns the newest `limit` (1-1000) in get_messages' thread-grouped format, plus
     "last_read"; "more": true means older unread messages exist beyond the limit.
+    Senders shown as "users/ID" have no name Google can give; see get_messages.
     Your own messages after the marker are included for context, although
     list_unread_spaces does not count them. Reading does not mark them read; call
     mark_space_read for that.
@@ -331,6 +336,25 @@ async def find_direct_message(user_id: str) -> str:
     """
     from google_chat import find_direct_message as _find_direct_message
     return _json(await _find_direct_message(user_id))
+
+@mcp.tool()
+async def set_user_name(user_id: str, name: str) -> str:
+    """Save the name to show for a person Google cannot name.
+
+    Messages from deleted or hidden accounts show the sender as "users/ID". When the
+    user tells you who that is (ask them when such a message matters, showing its text,
+    space and link), save it here. Every read then shows this name for that ID, in this
+    and other sessions. A name Google does provide always wins over a saved one.
+
+    Args:
+        user_id: The sender as shown, 'users/NUMERIC_ID'
+        name: The name to show; an empty string removes the saved name
+
+    Returns:
+        {"user_id", "name", "saved_names": how many names are saved}
+    """
+    from google_chat import set_user_name as _set
+    return _json(_set(user_id, name))
 
 @mcp.tool()
 async def find_group_chats(user_ids: List[str]) -> str:
