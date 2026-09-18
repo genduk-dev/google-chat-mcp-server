@@ -12,14 +12,21 @@ from auth_cli import run_cli_auth
 mcp = FastMCP("Google Chat")
 
 @mcp.tool()
-async def get_spaces() -> List[Dict]:
-    """List all Google Chat spaces the bot has access to.
+async def get_spaces(query: str = None, space_type: str = None, limit: int = 100) -> str:
+    """List your Google Chat spaces, most recently active first.
 
-    This tool requires OAuth authentication. On first run, it will open a browser window
-    for you to log in with your Google account. Make sure you have credentials.json
-    downloaded from Google Cloud Console in the current directory.
+    Args:
+        query: Only spaces whose name contains this text (case-insensitive). DMs and
+            group chats have no name; find those with find_direct_message or
+            find_group_chats.
+        space_type: Only SPACE, GROUP_CHAT or DIRECT_MESSAGE
+        limit: Max spaces to return (1-1000)
+
+    Returns:
+        {"total": spaces matching, "spaces": [{"space", "name"?, "type", "last_active"?}]}.
+        Use get_space for one space's details.
     """
-    return await list_chat_spaces()
+    return json.dumps(await list_chat_spaces(query, space_type, limit), ensure_ascii=False, separators=(',', ':'))
 
 @mcp.tool()
 async def get_messages(space_name: str,
@@ -176,7 +183,7 @@ async def search_messages(query: str,
     return await search_space_messages(query, space_name, limit, page_token)
 
 @mcp.tool()
-async def get_members(space_name: str) -> List[Dict]:
+async def get_members(space_name: str) -> str:
     """List all members of a Google Chat space with their user IDs and display names.
 
     Use this to look up user IDs for mentioning people in messages.
@@ -189,7 +196,7 @@ async def get_members(space_name: str) -> List[Dict]:
         List of members with user_id, display_name, mention, type, and role
     """
     from google_chat import list_space_members
-    return await list_space_members(space_name)
+    return json.dumps(await list_space_members(space_name), ensure_ascii=False, separators=(',', ':'))
 
 @mcp.tool()
 async def send_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> Dict:
@@ -287,7 +294,7 @@ async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
     return await _create_reaction(message_name, emoji_unicode)
 
 @mcp.tool()
-async def list_reactions(message_name: str) -> List[Dict]:
+async def list_reactions(message_name: str) -> str:
     """List all reactions on a message in a Google Chat space.
 
     Args:
@@ -298,7 +305,7 @@ async def list_reactions(message_name: str) -> List[Dict]:
         List of reaction objects, each containing emoji and user info
     """
     from google_chat import list_reactions as _list_reactions
-    return await _list_reactions(message_name)
+    return json.dumps(await _list_reactions(message_name), ensure_ascii=False, separators=(',', ':'))
 
 @mcp.tool()
 async def find_direct_message(user_id: str) -> Dict:

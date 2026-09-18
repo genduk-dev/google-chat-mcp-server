@@ -343,5 +343,28 @@ class PinsAndLookupsTest(unittest.TestCase):
             with self.assertRaisesRegex(Exception, '404'):
                 asyncio.run(google_chat.list_space_members(SPACE))
 
+class GetSpacesTest(unittest.TestCase):
+    def test_compact_filtered_and_most_recent_first(self):
+        chat = mock.MagicMock()
+        chat.spaces().list.return_value.execute.return_value = {'spaces': [
+            {'name': 'spaces/old', 'displayName': 'Ops Old', 'spaceType': 'SPACE',
+             'lastActiveTime': '2026-01-01T00:00:00Z', 'membershipCount': {}, 'spaceUri': 'u'},
+            {'name': 'spaces/new', 'displayName': 'ops new', 'spaceType': 'SPACE',
+             'lastActiveTime': '2026-09-18T00:00:00.5Z'},
+            {'name': 'spaces/gone', 'displayName': 'Ops gone', 'spaceType': 'SPACE',
+             'lastActiveTime': '1970-01-01T00:00:00Z'},
+            {'name': 'spaces/dm', 'spaceType': 'DIRECT_MESSAGE', 'lastActiveTime': '2026-09-18T01:00:00Z'}]}
+        with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
+                mock.patch.object(google_chat, '_get_service', return_value=chat):
+            result = asyncio.run(google_chat.list_chat_spaces(query='OPS', limit=2))
+            self.assertEqual(result, {'total': 3, 'spaces': [
+                {'space': 'spaces/new', 'name': 'ops new', 'type': 'SPACE', 'last_active': '2026-09-18T00:00:00Z'},
+                {'space': 'spaces/old', 'name': 'Ops Old', 'type': 'SPACE', 'last_active': '2026-01-01T00:00:00Z'}]})
+            asyncio.run(google_chat.list_chat_spaces(space_type='GROUP_CHAT'))
+            self.assertEqual(chat.spaces().list.call_args.kwargs['filter'], 'spaceType = "GROUP_CHAT"')
+            with self.assertRaises(ValueError):
+                asyncio.run(google_chat.list_chat_spaces(space_type='ROOM'))
+
+
 if __name__ == '__main__':
     unittest.main()

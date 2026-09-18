@@ -505,28 +505,53 @@ async def list_space_members(space_name: str) -> List[Dict]:
 
 
 # MCP functions
-async def list_chat_spaces() -> List[Dict]:
-    """Lists all Google Chat spaces the bot has access to."""
-    try:
-        creds = get_credentials()
-        if not creds:
-            raise Exception("No valid credentials found. Please authenticate first.")
-            
-        service = _get_service('chat', 'v1', creds)
-        all_spaces = []
-        page_token = None
-        while True:
-            list_args = {'pageSize': 100}
-            if page_token:
-                list_args['pageToken'] = page_token
-            response = service.spaces().list(**list_args).execute()
-            all_spaces.extend(response.get('spaces', []))
-            page_token = response.get('nextPageToken')
-            if not page_token:
-                break
-        return all_spaces
-    except Exception as e:
-        raise Exception(f"Failed to list chat spaces: {str(e)}") 
+SPACE_TYPES = {'SPACE', 'GROUP_CHAT', 'DIRECT_MESSAGE'}
+
+
+async def list_chat_spaces(query: Optional[str] = None, space_type: Optional[str] = None,
+                           limit: int = 100) -> Dict:
+    """The user's spaces, most recently active first, one short entry each.
+
+    Returns:
+        {'total': spaces matching, 'spaces': [{'space', 'name'?, 'type', 'last_active'?}]}.
+        DMs and group chats have no name.
+    """
+    if space_type is not None and space_type not in SPACE_TYPES:
+        raise ValueError(f"space_type must be one of {sorted(SPACE_TYPES)}")
+    if not 1 <= limit <= 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    service = _get_service('chat', 'v1', creds)
+    spaces, page_token = [], None
+    while True:
+        list_args = {'pageSize': 1000}
+        if space_type:
+            list_args['filter'] = f'spaceType = "{space_type}"'
+        if page_token:
+            list_args['pageToken'] = page_token
+        response = service.spaces().list(**list_args).execute()
+        spaces.extend(response.get('spaces', []))
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
+    if query:
+        needle = query.casefold()
+        spaces = [sp for sp in spaces if needle in sp.get('displayName', '').casefold()]
+    spaces.sort(key=lambda sp: _last_active(sp) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+                reverse=True)
+    out = []
+    for sp in spaces[:limit]:
+        entry = {'space': sp['name']}
+        if sp.get('displayName'):
+            entry['name'] = sp['displayName']
+        entry['type'] = sp.get('spaceType')
+        if _last_active(sp):
+            entry['last_active'] = _short_time(sp['lastActiveTime'])
+        out.append(entry)
+    return {'total': len(spaces), 'spaces': out}
+
 
 def _short_time(ts: Optional[str]) -> Optional[str]:
     """'2026-09-18T09:24:19.953311Z' -> '2026-09-18T09:24:19Z'."""
