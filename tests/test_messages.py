@@ -340,6 +340,15 @@ class PinsAndLookupsTest(unittest.TestCase):
             with self.assertRaisesRegex(Exception, r'\(403\): Permission denied'):
                 google_chat._chat_request(None, 'GET', 'spaces:findGroupChats')
 
+    def test_error_detail_reads_both_error_shapes(self):
+        def resp(body, text='raw'):
+            return mock.Mock(json=mock.Mock(return_value=body), text=text)
+        self.assertEqual(google_chat._error_detail(resp({'error': {'message': 'denied'}})), 'denied')
+        self.assertEqual(google_chat._error_detail(resp([{'error': {'message': 'Invalid resource name'}}])),
+                         'Invalid resource name')
+        broken = mock.Mock(json=mock.Mock(side_effect=ValueError), text='<html>502</html>')
+        self.assertEqual(google_chat._error_detail(broken), '<html>502</html>')
+
     def test_get_space_keeps_useful_fields_and_only_restricted_permissions(self):
         chat = mock.MagicMock()
         chat.spaces().get().execute.return_value = {

@@ -16,7 +16,6 @@ import re
 import uuid
 import urllib.parse
 import urllib.request
-import urllib.error
 from typing import List, Dict, Optional, Tuple
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -1392,16 +1391,25 @@ class ChatApiError(Exception):
         self.detail = detail
 
 
+def _error_detail(resp) -> str:
+    """Google's error message from a failed response. Most endpoints send
+    {"error": {...}}; the media endpoint wraps it in a list."""
+    try:
+        body = resp.json()
+        if isinstance(body, list):
+            body = body[0]
+        return body['error']['message']
+    except (ValueError, KeyError, IndexError, TypeError):
+        return resp.text[:500]
+
+
 def _chat_request(creds: Credentials, method: str, path: str, **kwargs) -> Dict:
     """Call a Chat API v1 method that the installed discovery client lacks
     (messagePins, findGroupChats, messages:search). Raises ChatApiError with
     Google's own error message."""
     resp = _http(creds).request(method, f"{CHAT_API}/{path}", **kwargs)
     if not resp.ok:
-        try:
-            detail = resp.json()['error']['message']
-        except (ValueError, KeyError):
-            detail = resp.text[:500]
+        detail = _error_detail(resp)
         raise ChatApiError(method, path, resp.status_code, detail)
     return resp.json() if resp.content else {}
 
@@ -1730,15 +1738,13 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
 
-        token = creds.token
         encoded_name = urllib.parse.quote(resource_name, safe='')
-        url = f"https://chat.googleapis.com/v1/media/{encoded_name}?alt=media"
-
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        resp = urllib.request.urlopen(req)
+        resp = _http(creds).get(f"{CHAT_API}/media/{encoded_name}", params={'alt': 'media'})
+        if not resp.ok:
+            raise ChatApiError('GET', 'media', resp.status_code, _error_detail(resp))
 
         content_type = resp.headers.get('Content-Type', 'application/octet-stream')
-        data = resp.read()
+        data = resp.content
 
         # Determine file extension: prefer content type, fallback to content_name
         ext_map = {
