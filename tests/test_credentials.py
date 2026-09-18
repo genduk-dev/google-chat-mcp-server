@@ -87,5 +87,45 @@ class LoopbackAuthTest(unittest.TestCase):
         exchange.assert_not_called()
 
 
+class WritePrivateTest(unittest.TestCase):
+    def test_owner_only_and_no_shared_temp_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'token.json'
+            seen = []
+            real_open = os.open
+            def spy(name, flags, mode=0o777):
+                seen.append((str(name), mode))
+                return real_open(name, flags, mode)
+            with mock.patch.object(google_chat.os, 'open', side_effect=spy):
+                google_chat.write_private(path, 'x')
+                google_chat.write_private(path, 'y')
+            self.assertEqual(path.read_text(), 'y')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual({mode for _, mode in seen}, {0o600})
+            self.assertNotEqual(seen[0][0], seen[1][0])
+            self.assertEqual(sorted(os.listdir(d)), ['token.json'])
+
+
+class ManualCompletionTest(unittest.TestCase):
+    def setUp(self):
+        self.flow = mock.Mock()
+        for name, value in [('_pending_auth_flow', self.flow), ('_pending_auth_state', 'S1'), ('_auth_server', None)]:
+            patcher = mock.patch.object(google_chat, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_failed_exchange_can_be_retried(self):
+        with mock.patch.object(google_chat, '_exchange_code', side_effect=[Exception('invalid_grant'),
+                                                                           mock.Mock(expiry=None)]):
+            with self.assertRaises(Exception):
+                google_chat.complete_authentication('typo')
+            self.assertTrue(google_chat.complete_authentication('good')['authenticated'])
+
+    def test_callback_from_another_attempt_is_refused(self):
+        with mock.patch.object(google_chat, '_exchange_code') as exchange:
+            with self.assertRaisesRegex(Exception, 'another sign-in attempt'):
+                google_chat.complete_authentication('http://localhost:1/?state=OLD&code=c')
+        exchange.assert_not_called()
+
 if __name__ == '__main__':
     unittest.main()

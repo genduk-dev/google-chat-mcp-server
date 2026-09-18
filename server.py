@@ -11,6 +11,13 @@ from auth_cli import run_cli_auth
 # Create an MCP server
 mcp = FastMCP("Google Chat")
 
+
+def _json(result) -> str:
+    """Tool output as compact JSON. FastMCP's own serialization escapes non-ASCII
+    (emoji, CJK) as \\uXXXX, pads separators, and splits a list into one content
+    item per element, all of which cost tokens."""
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+
 @mcp.tool()
 async def get_spaces(query: str = None, space_type: str = None, limit: int = 100) -> str:
     """List your Google Chat spaces, most recently active first.
@@ -26,7 +33,7 @@ async def get_spaces(query: str = None, space_type: str = None, limit: int = 100
         {"total": spaces matching, "spaces": [{"space", "name"?, "type", "last_active"?}]}.
         Use get_space for one space's details.
     """
-    return json.dumps(await list_chat_spaces(query, space_type, limit), ensure_ascii=False, separators=(',', ':'))
+    return _json(await list_chat_spaces(query, space_type, limit))
 
 @mcp.tool()
 async def get_messages(space_name: str,
@@ -47,6 +54,7 @@ async def get_messages(space_name: str,
         {"space": "spaces/S",
          "threads": [{"thread": "spaces/S/threads/T",
                       "messages": [{"id": "T.M", "sender": "...", "time": "...", "text": "..."}]}],
+         "more": true,        # with limit: older matching messages exist beyond it
          "truncated": true}   # only when more than 1000 messages matched
     Threads are ordered by their first returned message, messages oldest first.
     A message's full name is "{space}/messages/{id}"; use it for get_message, reactions,
@@ -93,10 +101,7 @@ async def get_messages(space_name: str,
             raise ValueError("Dates must be in YYYY-MM-DD format (e.g., '2024-03-22')")
         raise e
 
-    result = await list_space_messages(space_name, start_datetime, end_datetime, thread_name, limit)
-    # FastMCP's own serialization escapes non-ASCII (emoji, CJK) as \uXXXX and pads
-    # separators, which costs tokens on every message.
-    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+    return _json(await list_space_messages(space_name, start_datetime, end_datetime, thread_name, limit))
 
 @mcp.tool()
 async def list_unread_spaces(days: int = 1) -> str:
@@ -113,7 +118,7 @@ async def list_unread_spaces(days: int = 1) -> str:
         most recently active first.
     """
     from google_chat import list_unread_spaces as _list
-    return json.dumps(await _list(days), ensure_ascii=False, separators=(',', ':'))
+    return _json(await _list(days))
 
 @mcp.tool()
 async def get_unread_messages(space_name: str, limit: int = 50) -> str:
@@ -121,17 +126,19 @@ async def get_unread_messages(space_name: str, limit: int = 50) -> str:
 
     Returns the newest `limit` (1-1000) in get_messages' thread-grouped format, plus
     "last_read"; "more": true means older unread messages exist beyond the limit.
-    Reading does not mark them read; call mark_space_read for that.
+    Your own messages after the marker are included for context, although
+    list_unread_spaces does not count them. Reading does not mark them read; call
+    mark_space_read for that.
 
     Args:
         space_name: The space to read ('spaces/SPACE_ID')
         limit: How many of the newest unread messages to return
     """
     from google_chat import get_unread_messages as _get
-    return json.dumps(await _get(space_name, limit), ensure_ascii=False, separators=(',', ':'))
+    return _json(await _get(space_name, limit))
 
 @mcp.tool()
-async def mark_space_read(space_name: str) -> Dict:
+async def mark_space_read(space_name: str) -> str:
     """Mark everything in a space as read, as if you had opened it in Google Chat.
 
     This changes your real read state, so only do it when the user asked to, or after
@@ -141,13 +148,13 @@ async def mark_space_read(space_name: str) -> Dict:
         space_name: The space to mark read ('spaces/SPACE_ID')
     """
     from google_chat import mark_space_read as _mark
-    return await _mark(space_name)
+    return _json(await _mark(space_name))
 
 @mcp.tool()
 async def search_messages(query: str,
                           space_name: str = None,
                           limit: int = 50,
-                          page_token: str = None) -> Dict:
+                          page_token: str = None) -> str:
     """Full-text search for Google Chat messages by content.
 
     Searches every space you have access to by default, or a single space when
@@ -180,7 +187,7 @@ async def search_messages(query: str,
         Exception: If not authenticated, or if the search API is unavailable
     """
     from google_chat import search_space_messages
-    return await search_space_messages(query, space_name, limit, page_token)
+    return _json(await search_space_messages(query, space_name, limit, page_token))
 
 @mcp.tool()
 async def get_members(space_name: str) -> str:
@@ -196,10 +203,10 @@ async def get_members(space_name: str) -> str:
         List of members with user_id, display_name, mention, type, and role
     """
     from google_chat import list_space_members
-    return json.dumps(await list_space_members(space_name), ensure_ascii=False, separators=(',', ':'))
+    return _json(await list_space_members(space_name))
 
 @mcp.tool()
-async def send_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> Dict:
+async def send_message(space_name: str, text: str, thread_key: str = None, thread_name: str = None, quote_reply_message_name: str = None, file_paths: list = None, filenames: list = None) -> str:
     """Send a message to a Google Chat space, optionally with file attachments.
 
     Formatting (Google Chat renders these):
@@ -223,10 +230,10 @@ async def send_message(space_name: str, text: str, thread_key: str = None, threa
         The created message object with name, createTime, text, thread, and space
     """
     from google_chat import send_space_message as _send
-    return await _send(space_name, text, thread_key, thread_name, quote_reply_message_name, file_paths, filenames)
+    return _json(await _send(space_name, text, thread_key, thread_name, quote_reply_message_name, file_paths, filenames))
 
 @mcp.tool()
-async def delete_message(message_name: str) -> Dict:
+async def delete_message(message_name: str) -> str:
     """Delete a message from a Google Chat space.
 
     Only messages sent by the authenticated bot/user can be deleted.
@@ -239,10 +246,10 @@ async def delete_message(message_name: str) -> Dict:
         Confirmation of deletion
     """
     from google_chat import delete_space_message as _delete
-    return await _delete(message_name)
+    return _json(await _delete(message_name))
 
 @mcp.tool()
-async def get_message(message_name: str) -> Dict:
+async def get_message(message_name: str) -> str:
     """Fetch a single message by its resource name.
 
     Args:
@@ -253,10 +260,10 @@ async def get_message(message_name: str) -> Dict:
         The message object with name, sender, createTime, text, and thread
     """
     from google_chat import get_message as _get_message
-    return await _get_message(message_name)
+    return _json(await _get_message(message_name))
 
 @mcp.tool()
-async def update_message(message_name: str, text: str = None, file_paths: list = None, filenames: list = None, remove_quote_reply: bool = False) -> Dict:
+async def update_message(message_name: str, text: str = None, file_paths: list = None, filenames: list = None, remove_quote_reply: bool = False) -> str:
     """Edit an existing message in a Google Chat space — update text, add/replace attachments, or both.
 
     Only messages sent by the authenticated user can be edited.
@@ -276,10 +283,10 @@ async def update_message(message_name: str, text: str = None, file_paths: list =
         The updated message object with name, createTime, lastUpdateTime, text, and thread
     """
     from google_chat import update_message as _update_message
-    return await _update_message(message_name, text, file_paths, filenames, remove_quote_reply)
+    return _json(await _update_message(message_name, text, file_paths, filenames, remove_quote_reply))
 
 @mcp.tool()
-async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
+async def create_reaction(message_name: str, emoji_unicode: str) -> str:
     """Add an emoji reaction to a message in a Google Chat space.
 
     Args:
@@ -291,7 +298,7 @@ async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
         The created reaction object
     """
     from google_chat import create_reaction as _create_reaction
-    return await _create_reaction(message_name, emoji_unicode)
+    return _json(await _create_reaction(message_name, emoji_unicode))
 
 @mcp.tool()
 async def list_reactions(message_name: str) -> str:
@@ -305,10 +312,10 @@ async def list_reactions(message_name: str) -> str:
         List of reaction objects, each containing emoji and user info
     """
     from google_chat import list_reactions as _list_reactions
-    return json.dumps(await _list_reactions(message_name), ensure_ascii=False, separators=(',', ':'))
+    return _json(await _list_reactions(message_name))
 
 @mcp.tool()
-async def find_direct_message(user_id: str) -> Dict:
+async def find_direct_message(user_id: str) -> str:
     """Find an existing DM space with a specific user.
 
     Useful to check whether a DM already exists before creating a new one,
@@ -321,7 +328,7 @@ async def find_direct_message(user_id: str) -> Dict:
         Space object if a DM exists, or empty dict if no DM found
     """
     from google_chat import find_direct_message as _find_direct_message
-    return await _find_direct_message(user_id)
+    return _json(await _find_direct_message(user_id))
 
 @mcp.tool()
 async def find_group_chats(user_ids: List[str]) -> str:
@@ -337,16 +344,16 @@ async def find_group_chats(user_ids: List[str]) -> str:
         empty when no such group chat exists
     """
     from google_chat import find_group_chats as _find
-    return json.dumps(await _find(user_ids), ensure_ascii=False, separators=(',', ':'))
+    return _json(await _find(user_ids))
 
 @mcp.tool()
-async def get_space(space_name: str) -> Dict:
+async def get_space(space_name: str) -> str:
     """Details of one space.
 
     Returns:
         {"space", "name"?, "type", "description"?, "guidelines"?, "members" (Google's
-        count of people who joined directly; it can leave out external people, so use
-        get_members for who is in it), "member_groups"?, "external_allowed"?, "discoverable"?, "history_off"?
+        count of people who joined directly; it can leave out external people and removed
+        accounts, so use get_members for who is in it), "member_groups"?, "external_allowed"?, "discoverable"?, "history_off"?
         (messages deleted after 24h), "threading"? (when not threaded), "created",
         "last_active"?, "uri", "restricted"?: {setting: [roles allowed]}}.
         Optional keys appear only when they differ from the usual: a private, threaded
@@ -357,10 +364,10 @@ async def get_space(space_name: str) -> Dict:
         space_name: The space ('spaces/SPACE_ID')
     """
     from google_chat import get_space as _get_space
-    return await _get_space(space_name)
+    return _json(await _get_space(space_name))
 
 @mcp.tool()
-async def get_member(space_name: str, user: str) -> Dict:
+async def get_member(space_name: str, user: str) -> str:
     """Look up one person's membership in a space: whether they are in it, their role
     and when they joined. Cheaper than get_members for a single person.
 
@@ -373,7 +380,7 @@ async def get_member(space_name: str, user: str) -> Dict:
         {"user_id", "state": "NOT_A_MEMBER"} when they are not in the space
     """
     from google_chat import get_member as _get_member
-    return await _get_member(space_name, user)
+    return _json(await _get_member(space_name, user))
 
 @mcp.tool()
 async def list_pinned_messages(space_name: str) -> str:
@@ -384,27 +391,27 @@ async def list_pinned_messages(space_name: str) -> str:
         message you can no longer read is {"id", "unavailable": HTTP status}
     """
     from google_chat import list_pinned_messages as _list
-    return json.dumps(await _list(space_name), ensure_ascii=False, separators=(',', ':'))
+    return _json(await _list(space_name))
 
 @mcp.tool()
-async def pin_message(message_name: str) -> Dict:
+async def pin_message(message_name: str) -> str:
     """Pin a message in its space, for everyone in the space.
 
     Args:
         message_name: 'spaces/SPACE_ID/messages/MESSAGE_ID'
     """
     from google_chat import pin_message as _pin
-    return await _pin(message_name)
+    return _json(await _pin(message_name))
 
 @mcp.tool()
-async def unpin_message(message_name: str) -> Dict:
+async def unpin_message(message_name: str) -> str:
     """Unpin a message, for everyone in the space.
 
     Args:
         message_name: 'spaces/SPACE_ID/messages/MESSAGE_ID'
     """
     from google_chat import unpin_message as _unpin
-    return await _unpin(message_name)
+    return _json(await _unpin(message_name))
 
 @mcp.tool()
 async def list_space_events(space_name: str,
@@ -430,17 +437,17 @@ async def list_space_events(space_name: str,
         limit: Max events (1-1000)
 
     Returns:
-        {"space", "events": [{"time", "type", ...}], "more"?}. Message events carry the
+        {"space", "events": [{"time", "type", ...}], "next_start_time"?}. Message events carry the
         message in get_messages' format (or "deleted" and "deletion"), reaction events
-        "message", "user", "emoji", membership events the member. "more": true means
-        later events were cut by limit; call again with start_time set to the last time.
+        "message", "user", "emoji", membership events the member. "next_start_time" means
+        later events were cut by limit; call again with start_time set to it. The cut never
+        splits events that share a time, so a batch can make a page exceed limit.
     """
     from google_chat import list_space_events as _list
-    return json.dumps(await _list(space_name, event_types, start_time, end_time, limit),
-                      ensure_ascii=False, separators=(',', ':'))
+    return _json(await _list(space_name, event_types, start_time, end_time, limit))
 
 @mcp.tool()
-async def delete_reaction(reaction_name: str) -> Dict:
+async def delete_reaction(reaction_name: str) -> str:
     """Remove a reaction from a Google Chat message.
 
     Use list_reactions() to find the full reaction resource name.
@@ -453,10 +460,10 @@ async def delete_reaction(reaction_name: str) -> Dict:
         Confirmation of deletion
     """
     from google_chat import delete_reaction as _delete_reaction
-    return await _delete_reaction(reaction_name)
+    return _json(await _delete_reaction(reaction_name))
 
 @mcp.tool()
-async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: str = None) -> Dict:
+async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: str = None) -> str:
     """Download a file attachment from a Google Chat message.
 
     Use this after get_message or get_messages returns a message with
@@ -472,7 +479,7 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
         Dict with path (saved file location), contentName, contentType, and size in bytes
     """
     from google_chat import download_attachment as _download
-    return await _download(resource_name, save_dir, content_name)
+    return _json(await _download(resource_name, save_dir, content_name))
 
 @mcp.tool()
 def authenticate() -> str:
@@ -492,7 +499,7 @@ def authenticate() -> str:
     return start_authentication()
 
 @mcp.tool()
-def complete_authentication(callback_url: str) -> Dict:
+def complete_authentication(callback_url: str) -> str:
     """Complete an in-progress OAuth flow for Google Chat.
 
     Only needed when the browser ran on another machine than this server. Then the
@@ -507,19 +514,20 @@ def complete_authentication(callback_url: str) -> Dict:
         A dict with authentication status details
     """
     from google_chat import complete_authentication as _complete_authentication
-    return _complete_authentication(callback_url)
+    return _json(_complete_authentication(callback_url))
 
 def run_channel(args) -> None:
     """Serve the normal tools plus the channel capability, watch tools, and poller."""
     from pathlib import Path
     import anyio
     from mcp.server.stdio import stdio_server
+    from mcp.shared.message import SessionMessage
     from channel import Channel, ChannelStore, INSTRUCTIONS
 
     state_path = Path(args.channel_state_path or Path(args.token_path).parent / 'channel_state.json')
     channel = Channel(ChannelStore(state_path), args.poll_seconds)
 
-    def watch_space(space_name: str, allowed_senders: List[str] = None, mention_only: bool = False) -> Dict:
+    def watch_space(space_name: str, allowed_senders: List[str] = None, mention_only: bool = False) -> str:
         """Start pushing new messages from a Google Chat space into this Claude Code session,
         or replace the settings of a space that is already watched.
 
@@ -536,23 +544,23 @@ def run_channel(args) -> None:
             allowed_senders: Optional list of 'users/USER_ID' whose messages are delivered
             mention_only: Deliver only messages that mention @BOT_NAME
         """
-        return channel.watch(space_name, allowed_senders, mention_only)
+        return _json(channel.watch(space_name, allowed_senders, mention_only))
 
-    def unwatch_space(space_name: str) -> Dict:
+    def unwatch_space(space_name: str) -> str:
         """Stop pushing messages from a Google Chat space into this session.
 
         Args:
             space_name: The space to stop watching (format: 'spaces/SPACE_ID')
         """
-        return channel.unwatch(space_name)
+        return _json(channel.unwatch(space_name))
 
-    def list_watched_spaces() -> Dict:
+    def list_watched_spaces() -> str:
         """List the channel config: the bot name and its @mention, the message ID prefix
         that marks this server's own messages, which process is polling (poller.active_here
         is false when another channel session on this machine receives the messages), and
         each watched space with its allowed senders and mention_only setting. The bot name
         comes from the BOT_NAME env var and cannot be changed by a tool."""
-        return channel.list_watched()
+        return _json(channel.list_watched())
 
     for fn in (watch_space, unwatch_space, list_watched_spaces):
         mcp.add_tool(fn)
@@ -563,10 +571,23 @@ def run_channel(args) -> None:
         experimental_capabilities={'claude/channel': {}})
 
     async def main():
+        initialized = anyio.Event()
+        to_server, from_client = anyio.create_memory_object_stream(0)
+
+        async def relay(read_stream):
+            # Passes every client message to the server, noting when the handshake ends.
+            async with to_server:
+                async for message in read_stream:
+                    if (isinstance(message, SessionMessage)
+                            and getattr(message.message.root, 'method', None) == 'notifications/initialized'):
+                        initialized.set()
+                    await to_server.send(message)
+
         async with stdio_server() as (read_stream, write_stream):
             async with anyio.create_task_group() as tg:
-                tg.start_soon(channel.run, write_stream)
-                await server.run(read_stream, write_stream, options)
+                tg.start_soon(relay, read_stream)
+                tg.start_soon(channel.run, write_stream, initialized)
+                await server.run(from_client, write_stream, options)
                 tg.cancel_scope.cancel()
 
     anyio.run(main)

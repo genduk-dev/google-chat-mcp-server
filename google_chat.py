@@ -105,6 +105,7 @@ APP_MESSAGE_PREFIX = f'client-{BOT_NAME}-'
 # Holds the in-progress OAuth flow between a start_authentication() and
 # complete_authentication() call, since they happen as two separate tool calls.
 _pending_auth_flow: Optional[InstalledAppFlow] = None
+_pending_auth_state: Optional[str] = None
 
 # Store credentials info
 token_info = {
@@ -135,6 +136,24 @@ def set_filter_messages(enabled: bool) -> None:
     global FILTER_MESSAGES
     FILTER_MESSAGES = enabled
 
+def write_private(path: Path, text: str) -> None:
+    """Replace path atomically with owner-only permissions from the first byte.
+
+    Several server processes share these files, so each writes its own temp
+    file; a shared name would let one process move another's half-written file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _load_token_file(token_path: Path) -> Credentials:
     """Load a token with the scopes recorded in it, which are the ones granted.
 
@@ -157,10 +176,7 @@ def save_credentials(creds: Credentials, token_path: Optional[str] = None) -> No
     
     # Written atomically: other server processes reload this file whenever it changes.
     token_path = Path(token_path)
-    tmp = token_path.with_suffix('.tmp')
-    tmp.write_text(creds.to_json())
-    os.chmod(tmp, 0o600)
-    tmp.replace(token_path)
+    write_private(token_path, creds.to_json())
 
     # Update in-memory cache
     token_info['credentials'] = creds
@@ -196,10 +212,14 @@ def get_credentials(token_path: Optional[str] = None) -> Optional[Credentials]:
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            save_credentials(creds, token_path)
         except Exception as e:
             logger.warning("Failed to refresh credentials: %s", e)
             return None
+        try:
+            save_credentials(creds, token_path)
+        except OSError as e:
+            # The refreshed token still works in this process; only sharing it failed.
+            logger.warning("Refreshed credentials could not be saved to %s: %s", token_path, e)
     
     return creds if (creds and creds.valid) else None
 
@@ -409,7 +429,8 @@ def message_text(msg: Dict) -> str:
 
 # Code spans and fences are left alone so markdown inside them stays literal.
 _CODE = re.compile(r'```.*?```|`[^`\n]*`', re.DOTALL)
-_MD_LINK = re.compile(r'\[([^\]\n]+)\]\((https?://[^)\s]+)\)')
+# The URL may hold one level of balanced parentheses, as Wikipedia links do.
+_MD_LINK = re.compile(r'\[([^\]\n]+)\]\((https?://(?:[^()\s]|\([^()\s]*\))+)\)')
 _MD_BOLD = re.compile(r'\*\*(?=\S)(.+?)(?<=\S)\*\*')
 _MD_STRIKE = re.compile(r'~~(?=\S)(.+?)(?<=\S)~~')
 
@@ -697,16 +718,20 @@ _self_id_cache: Dict[str, str] = {}
 
 
 def self_user_id(creds: Credentials) -> str:
-    """The authenticated user as a Chat 'users/ID' name."""
-    if 'id' not in _self_id_cache:
+    """The authenticated user as a Chat 'users/ID' name, cached per refresh token
+    so a sign-in as another account is not answered with the old ID."""
+    key = creds.refresh_token or creds.token
+    if key not in _self_id_cache:
         person = _get_service('people', 'v1', creds).people().get(
             resourceName='people/me', personFields='names').execute()
-        _self_id_cache['id'] = person['resourceName'].replace('people/', 'users/')
-    return _self_id_cache['id']
+        _self_id_cache.clear()
+        _self_id_cache[key] = person['resourceName'].replace('people/', 'users/')
+    return _self_id_cache[key]
 
 
 CHAT_API = 'https://chat.googleapis.com/v1'
 UNREAD_WORKERS = 8
+UNREAD_MAX_PAGES = 10
 _thread_local = threading.local()
 
 
@@ -744,11 +769,18 @@ def _space_unread(creds: Credentials, space: Dict, self_id: str) -> Optional[Dic
     params = {'pageSize': 100}
     if last_read:
         params['filter'] = f'createTime > "{last_read}"'
-    resp = http.get(f"{CHAT_API}/{space['name']}/messages", params=params)
-    resp.raise_for_status()
-    page = resp.json()
-    # Your own messages after the read marker are not unread for you.
-    others = [m for m in page.get('messages', []) if m.get('sender', {}).get('name') != self_id]
+    # Your own messages after the read marker are not unread for you, so keep
+    # paging until 100 others' messages are counted or the pages run out.
+    others, pages = [], 0
+    while True:
+        resp = http.get(f"{CHAT_API}/{space['name']}/messages", params=params)
+        resp.raise_for_status()
+        page = resp.json()
+        others.extend(m for m in page.get('messages', []) if m.get('sender', {}).get('name') != self_id)
+        pages += 1
+        if len(others) >= 100 or not page.get('nextPageToken') or pages == UNREAD_MAX_PAGES:
+            break
+        params['pageToken'] = page['nextPageToken']
     if not others:
         return None
     name = space.get('displayName')
@@ -762,7 +794,7 @@ def _space_unread(creds: Credentials, space: Dict, self_id: str) -> Optional[Dic
         name = ', '.join(senders[:3]) + (' and others' if len(senders) > 3 else '')
     count = len(others)
     return {'space': space['name'], 'name': name, 'type': space.get('spaceType'),
-            'unread': f'{count}+' if page.get('nextPageToken') else count,
+            'unread': f'{min(count, 100)}+' if count > 100 or page.get('nextPageToken') else count,
             'last_read': _short_time(last_read),
             'latest': _short_time(space['lastActiveTime']) if active else _short_time(others[-1].get('createTime'))}
 
@@ -1345,7 +1377,10 @@ async def list_pinned_messages(space_name: str) -> Dict:
 
     def fetch(pin):
         resp = _http(creds).get(f"{CHAT_API}/{pin['message']}")
-        return resp.json() if resp.ok else {'name': pin['message'], 'error': resp.status_code}
+        if resp.status_code in (403, 404):
+            return {'name': pin['message'], 'error': resp.status_code}
+        resp.raise_for_status()  # a transient failure is not a fact about access
+        return resp.json()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=UNREAD_WORKERS) as pool:
         messages = await asyncio.get_running_loop().run_in_executor(None, lambda: list(pool.map(fetch, pins)))
@@ -1478,7 +1513,8 @@ async def list_space_events(space_name: str,
         clauses.append(f'end_time="{_rfc3339(end_time)}"')
     clauses.append(f'({type_filter})' if clauses and len(types) > 1 else type_filter)
     service = _get_service('chat', 'v1', creds)
-    events, page_token, more = [], None, False
+    # (eventTime, entry): a batch expands into several entries with one eventTime.
+    events, page_token = [], None
     while True:
         args = {'parent': space_name, 'filter': ' AND '.join(clauses), 'pageSize': 100}
         if page_token:
@@ -1487,17 +1523,26 @@ async def list_space_events(space_name: str,
         for event in response.get('spaceEvents', []):
             kind = _event_type(event['eventType'])
             for payload in _event_payloads(event):
-                events.append(_space_event_entry(kind, event['eventTime'], payload, creds, space_name))
+                events.append((event['eventTime'], _space_event_entry(kind, event['eventTime'], payload, creds, space_name)))
         page_token = response.get('nextPageToken')
-        if len(events) >= limit:
-            more = len(events) > limit or bool(page_token)
-            events = events[:limit]
+        if len(events) > limit or not page_token:
             break
-        if not page_token:
-            break
-    result = {'space': space_name, 'events': events}
-    if more:
-        result['more'] = True
+    result = {'space': space_name}
+    if len(events) > limit or page_token:
+        # start_time is exclusive, so cut only where the time changes; otherwise a
+        # continuation from the last returned time would skip the rest of its batch.
+        cut = min(limit, len(events))
+        while 0 < cut < len(events) and events[cut - 1][0] == events[cut][0]:
+            cut -= 1
+        if cut == 0:  # one batch larger than limit: return it whole
+            cut = limit
+            while cut < len(events) and events[cut - 1][0] == events[cut][0]:
+                cut += 1
+        more = cut < len(events) or bool(page_token)
+        events = events[:cut]
+        if more:
+            result['next_start_time'] = events[-1][0]
+    result['events'] = [entry for _, entry in events]
     return result
 
 
@@ -1732,15 +1777,15 @@ def start_authentication(credentials_path: Optional[str] = None) -> str:
     Raises:
         Exception: If credentials.json is missing or the flow can't be created
     """
-    global _pending_auth_flow, _auth_server
+    global _pending_auth_flow, _pending_auth_state, _auth_server
 
     if credentials_path is None:
         credentials_path = str(Path(token_info['token_path']).parent / 'credentials.json')
     creds_file = Path(credentials_path)
     if not creds_file.exists():
         raise Exception(
-            f"{credentials_path} not found. Download it from Google Cloud Console "
-            "and save it in the current directory."
+            f"{credentials_path} not found. Download the OAuth client JSON from Google "
+            "Cloud Console and save it at that path."
         )
 
     if _auth_server is not None:
@@ -1763,17 +1808,17 @@ def start_authentication(credentials_path: Optional[str] = None) -> str:
     )
 
     server.flow, server.state = flow, state
-    _pending_auth_flow, _auth_server = flow, server
+    _pending_auth_flow, _pending_auth_state, _auth_server = flow, state, server
     threading.Thread(target=_serve_callback, args=(server,), daemon=True).start()
     return auth_url
 
 
 def _exchange_code(flow: InstalledAppFlow, code: str, token_path: Optional[str] = None) -> Credentials:
-    global _pending_auth_flow
+    global _pending_auth_flow, _pending_auth_state
     flow.fetch_token(code=code)
     creds = flow.credentials
     save_credentials(creds, token_path)
-    _pending_auth_flow = None
+    _pending_auth_flow = _pending_auth_state = None
     return creds
 
 
@@ -1793,7 +1838,6 @@ def complete_authentication(callback_url: str, token_path: Optional[str] = None)
         Exception: If no authentication flow is in progress, the callback has no code,
                    or the code exchange fails
     """
-    global _pending_auth_flow
 
     if _pending_auth_flow is None:
         raise Exception(
@@ -1812,19 +1856,21 @@ def complete_authentication(callback_url: str, token_path: Optional[str] = None)
         if 'code' not in params:
             raise Exception("No authorization code found in the callback URL.")
 
+        if params.get('state', [_pending_auth_state])[0] != _pending_auth_state:
+            raise Exception("This callback URL belongs to another sign-in attempt; "
+                            "use the URL from the latest authenticate call.")
+
         code = params['code'][0]
     else:
         code = callback_url
 
-    try:
-        creds = _exchange_code(_pending_auth_flow, code, token_path)
-        if _auth_server is not None:
-            _auth_server.done = True
-        return {
-            'authenticated': True,
-            'has_refresh_token': bool(creds.refresh_token),
-            'expiry': creds.expiry.isoformat() if creds.expiry else None,
-        }
-    finally:
-        _pending_auth_flow = None
+    # A failed exchange (a mistyped code) leaves the flow pending, so it can be retried.
+    creds = _exchange_code(_pending_auth_flow, code, token_path)
+    if _auth_server is not None:
+        _auth_server.done = True
+    return {
+        'authenticated': True,
+        'has_refresh_token': bool(creds.refresh_token),
+        'expiry': creds.expiry.isoformat() if creds.expiry else None,
+    }
 

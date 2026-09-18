@@ -180,10 +180,9 @@ class ToChatMarkupTest(unittest.TestCase):
 class SpaceUnreadTest(unittest.TestCase):
     ME, OTHER = 'users/me1', 'users/o1'
 
-    def run_unread(self, space, read_state, page):
+    def run_unread(self, space, read_state, *pages):
         http = mock.Mock()
-        http.get.side_effect = [mock.Mock(json=mock.Mock(return_value=read_state)),
-                                mock.Mock(json=mock.Mock(return_value=page))]
+        http.get.side_effect = [mock.Mock(json=mock.Mock(return_value=p)) for p in (read_state, *pages)]
         with mock.patch.object(google_chat, '_http', return_value=http):
             return google_chat._space_unread(None, space, self.ME), http
 
@@ -206,10 +205,18 @@ class SpaceUnreadTest(unittest.TestCase):
         page = {'messages': [{'sender': {'name': self.ME}}]}
         self.assertIsNone(self.run_unread(self.space(), {'lastReadTime': '2026-09-18T09:00:00Z'}, page)[0])
 
-    def test_more_than_a_page_is_capped_and_dm_is_named_after_senders(self):
-        page = {'messages': [{'sender': {'name': self.OTHER, 'displayName': 'Andri'}}], 'nextPageToken': 'x'}
-        result, _ = self.run_unread(self.space(displayName='', spaceType='DIRECT_MESSAGE'), {}, page)
-        self.assertEqual((result['unread'], result['name'], result['last_read']), ('1+', 'Andri', None))
+    def test_more_than_a_hundred_is_capped_and_dm_is_named_after_senders(self):
+        page = {'messages': [{'sender': {'name': self.OTHER, 'displayName': 'Andri'}}] * 100, 'nextPageToken': 'x'}
+        result, http = self.run_unread(self.space(displayName='', spaceType='DIRECT_MESSAGE'), {}, page)
+        self.assertEqual((result['unread'], result['name'], result['last_read']), ('100+', 'Andri', None))
+        self.assertEqual(http.get.call_count, 2)
+
+    def test_pages_past_a_page_of_your_own_messages(self):
+        mine = {'messages': [{'sender': {'name': self.ME}}] * 100, 'nextPageToken': 'p2'}
+        theirs = {'messages': [{'sender': {'name': self.OTHER}}]}
+        result, http = self.run_unread(self.space(), {'lastReadTime': '2026-09-18T09:00:00Z'}, mine, theirs)
+        self.assertEqual(result['unread'], 1)
+        self.assertEqual(http.get.call_args.kwargs['params']['pageToken'], 'p2')
 
 
     def test_epoch_last_active_is_unknown_so_the_space_is_still_checked(self):
@@ -280,14 +287,37 @@ class SpaceEventsTest(unittest.TestCase):
         self.assertEqual((events[3]['type'], events[3]['emoji'], 'user' in events[3]),
                          ('reaction.created', ':party:', False))
 
-    def test_limit_cuts_and_reports_more(self):
-        event = {'eventTime': '2026-09-18T09:06:00Z', 'eventType': 'google.workspace.chat.message.v1.deleted',
-                 'messageDeletedEventData': {'message': {'name': f'{SPACE}/messages/X', 'deleteTime': 'x'}}}
-        result = self.run_events([{'spaceEvents': [event] * 2, 'nextPageToken': 'n'}, {'spaceEvents': [event] * 2}],
-                                 limit=3)
-        self.assertEqual((len(result['events']), result['more']), (3, True))
-        result = self.run_events([{'spaceEvents': [event] * 3}], limit=3)
-        self.assertNotIn('more', result)
+    @staticmethod
+    def deleted(time):
+        return {'eventTime': time, 'eventType': 'google.workspace.chat.message.v1.deleted',
+                'messageDeletedEventData': {'message': {'name': f'{SPACE}/messages/X', 'deleteTime': 'x'}}}
+
+    @staticmethod
+    def batch(time, n):
+        return {'eventTime': time, 'eventType': 'google.workspace.chat.message.v1.batchDeleted',
+                'messageBatchDeletedEventData': {'messages': [
+                    {'message': {'name': f'{SPACE}/messages/B{i}', 'deleteTime': 'x'}} for i in range(n)]}}
+
+    def test_limit_never_splits_events_of_one_time(self):
+        page = {'spaceEvents': [self.deleted('2026-09-18T09:00:00.1Z'), self.deleted('2026-09-18T09:00:00.2Z')],
+                'nextPageToken': 'n'}
+        result = self.run_events([page, {'spaceEvents': [self.deleted('2026-09-18T09:00:00.3Z')] * 2}], limit=3)
+        # Taking 3 would split the two events at .3, so the cut moves back before them.
+        self.assertEqual((len(result['events']), result['next_start_time']), (2, '2026-09-18T09:00:00.2Z'))
+
+    def test_a_batch_is_never_split_by_the_limit(self):
+        result = self.run_events([{'spaceEvents': [self.deleted('2026-09-18T09:00:00.1Z'),
+                                                   self.batch('2026-09-18T09:00:00.2Z', 3)]}], limit=2)
+        self.assertEqual((len(result['events']), result['next_start_time']), (1, '2026-09-18T09:00:00.1Z'))
+
+    def test_a_batch_larger_than_the_limit_is_returned_whole(self):
+        result = self.run_events([{'spaceEvents': [self.batch('2026-09-18T09:00:00.2Z', 3),
+                                                   self.deleted('2026-09-18T09:00:00.3Z')]}], limit=2)
+        self.assertEqual((len(result['events']), result['next_start_time']), (3, '2026-09-18T09:00:00.2Z'))
+
+    def test_everything_within_the_limit_has_no_continuation(self):
+        result = self.run_events([{'spaceEvents': [self.deleted('2026-09-18T09:00:00.1Z')] * 3}], limit=3)
+        self.assertNotIn('next_start_time', result)
 
 
 class PinsAndLookupsTest(unittest.TestCase):
@@ -349,6 +379,37 @@ class PinsAndLookupsTest(unittest.TestCase):
             chat.spaces().members().list.return_value.execute.side_effect = RuntimeError('404')
             with self.assertRaisesRegex(Exception, '404'):
                 asyncio.run(google_chat.list_space_members(SPACE))
+
+class ReviewFixesTest(unittest.TestCase):
+    def test_markdown_link_keeps_parentheses_in_the_url(self):
+        self.assertEqual(google_chat.to_chat_markup('[Foo](https://en.wikipedia.org/wiki/Foo_(bar)) done'),
+                         '<https://en.wikipedia.org/wiki/Foo_(bar)|Foo> done')
+
+    def pins_with(self, status):
+        resp = mock.Mock(status_code=status, ok=status < 400, json=mock.Mock(return_value=msg('T.M')))
+        resp.raise_for_status.side_effect = None if status < 400 else RuntimeError(f'{status}')
+        with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
+                mock.patch.object(google_chat, '_chat_request',
+                                  return_value={'messagePins': [{'message': f'{SPACE}/messages/T.M'}]}), \
+                mock.patch.object(google_chat, '_http', return_value=mock.Mock(get=mock.Mock(return_value=resp))), \
+                mock.patch.object(google_chat, 'get_user_display_name', return_value='Husni'):
+            return asyncio.run(google_chat.list_pinned_messages(SPACE))
+
+    def test_pin_you_cannot_read_is_unavailable_but_a_server_error_raises(self):
+        self.assertEqual(self.pins_with(404)['pins'], [{'id': 'T.M', 'unavailable': 404}])
+        self.assertEqual(self.pins_with(200)['pins'][0]['text'], 'hi')
+        with self.assertRaisesRegex(RuntimeError, '503'):
+            self.pins_with(503)
+
+    def test_self_id_is_looked_up_again_for_another_account(self):
+        people = mock.MagicMock()
+        people.people().get().execute.side_effect = [{'resourceName': 'people/1'}, {'resourceName': 'people/2'}]
+        with mock.patch.object(google_chat, '_get_service', return_value=people), \
+                mock.patch.dict(google_chat._self_id_cache, clear=True):
+            a, b = mock.Mock(refresh_token='ra'), mock.Mock(refresh_token='rb')
+            self.assertEqual([google_chat.self_user_id(a), google_chat.self_user_id(a),
+                              google_chat.self_user_id(b)], ['users/1', 'users/1', 'users/2'])
+
 
 class GetSpacesTest(unittest.TestCase):
     def test_compact_filtered_and_most_recent_first(self):

@@ -182,6 +182,33 @@ class PollTest(unittest.TestCase):
 
 
 
+class RunTest(unittest.TestCase):
+    def test_nothing_is_polled_or_sent_before_the_client_is_initialized(self):
+        import anyio
+        ch = Channel(ChannelStore(Path(tempfile.mkdtemp()) / 'state.json'), 0.01)
+        sent = []
+
+        class Stream:
+            async def send(self, message):
+                sent.append(message)
+
+        async def scenario():
+            initialized = anyio.Event()
+            with mock.patch.object(ch, 'try_acquire', return_value=True), \
+                    mock.patch.object(ch, 'poll_once', return_value=[{'content': 'x', 'meta': {}}]) as poll, \
+                    mock.patch.object(ch, '_save_cursors'):
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(ch.run, Stream(), initialized)
+                    await anyio.sleep(0.05)
+                    self.assertEqual((poll.call_count, sent), (0, []))
+                    initialized.set()
+                    await anyio.sleep(0.05)
+                    tg.cancel_scope.cancel()
+            self.assertGreater(len(sent), 0)
+
+        anyio.run(scenario)
+
+
 class PollerLockTest(unittest.TestCase):
     """Two Channel objects on the same state path stand in for two channel sessions."""
 
@@ -209,34 +236,70 @@ class PollerLockTest(unittest.TestCase):
         self.assertTrue(b.try_acquire())
         self.assertEqual(b.poller_status(), {'active_here': True, 'holder_pid': os.getpid()})
 
+    def write_saved(self, cursors, saved_at):
+        (Path(self.dir.name) / 'channel_cursors.json').write_text(
+            json.dumps({'saved_at': saved_at.isoformat(), 'cursors': cursors}))
+
     def test_takeover_resumes_from_the_previous_pollers_cursor(self):
         a = self.channel()
         a.try_acquire()
-        fresh = channel.datetime.datetime.now(channel.datetime.timezone.utc).isoformat()
-        a.cursors[SPACE] = fresh
+        a.cursors[SPACE] = '2026-09-18T06:00:00Z'
         a._save_cursors()
         self.exit_process(a)
         b = self.channel()
         b.try_acquire()
-        self.assertEqual(b.cursors[SPACE], fresh)
+        self.assertEqual(b.cursors[SPACE], '2026-09-18T06:00:00Z')
 
-    def test_stale_cursor_is_not_resumed_so_old_backlog_is_not_replayed(self):
-        (Path(self.dir.name) / 'channel_cursors.json').write_text(
-            '{"%s": "2026-01-01T00:00:00Z"}' % SPACE)
+    def test_quiet_space_keeps_its_old_cursor_when_the_poller_saved_recently(self):
+        # The last message is hours old, but the poller was alive a moment ago.
+        now = channel.datetime.datetime.now(channel.datetime.timezone.utc)
+        self.write_saved({SPACE: '2026-01-01T00:00:00Z'}, now)
+        b = self.channel()
+        b.try_acquire()
+        self.assertEqual(b.cursors[SPACE], '2026-01-01T00:00:00Z')
+
+    def test_cursors_of_a_poller_gone_too_long_are_not_resumed(self):
+        old = channel.datetime.datetime.now(channel.datetime.timezone.utc) - channel.datetime.timedelta(hours=1)
+        self.write_saved({SPACE: '2026-01-01T00:00:00Z'}, old)
         b = self.channel()
         b.try_acquire()
         self.assertNotIn(SPACE, b.cursors)
+
+    def test_standby_watch_cursor_is_dropped_on_takeover(self):
+        # A standby's watch() hours ago must not replay everything since then.
+        b = self.channel()
+        b.cursors[SPACE] = '2026-09-18T01:00:00Z'
+        b.try_acquire()
+        self.assertNotIn(SPACE, b.cursors)
+
+    def test_unchanged_cursors_are_resaved_as_a_heartbeat(self):
+        a = self.channel()
+        a.try_acquire()
+        a.cursors[SPACE] = '2026-09-18T06:00:00Z'
+        a._save_cursors()
+        path = Path(self.dir.name) / 'channel_cursors.json'
+        first = json.loads(path.read_text())['saved_at']
+        a._saved_at -= channel.CURSOR_HEARTBEAT
+        a._save_cursors()
+        self.assertGreater(json.loads(path.read_text())['saved_at'], first)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_saved_cursors_drop_unwatched_spaces(self):
         a = self.channel()
         a.try_acquire()
         a.cursors = {SPACE: '2026-09-18T00:00:00Z', 'spaces/GONE': '2026-09-18T00:00:00Z'}
         a._save_cursors()
-        self.assertEqual(list(json.loads((Path(self.dir.name) / 'channel_cursors.json').read_text())), [SPACE])
+        saved = json.loads((Path(self.dir.name) / 'channel_cursors.json').read_text())
+        self.assertEqual(list(saved['cursors']), [SPACE])
 
     def test_stale_lock_pid_is_reported_as_no_holder(self):
         (Path(self.dir.name) / 'channel.lock').write_text('999999')
         with mock.patch.object(channel.os, 'kill', side_effect=ProcessLookupError):
+            self.assertEqual(self.channel().poller_status(), {'active_here': False, 'holder_pid': None})
+
+    def test_lock_pid_reused_by_another_users_process_is_no_holder(self):
+        (Path(self.dir.name) / 'channel.lock').write_text('1')
+        with mock.patch.object(channel.os, 'kill', side_effect=PermissionError):
             self.assertEqual(self.channel().poller_status(), {'active_here': False, 'holder_pid': None})
 
 if __name__ == '__main__':

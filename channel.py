@@ -23,7 +23,7 @@ import mcp.types as types
 from mcp.shared.message import SessionMessage
 
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text,
-                         self_user_id, _get_service)
+                         self_user_id, write_private, _get_service)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +41,13 @@ INSTRUCTIONS = (
     'thread_name=thread_name).'
 )
 
-# A takeover resumes from saved cursors only if they are this fresh. Older ones
-# mean no channel session was running, and replaying that backlog would flood
-# the new session with messages nobody asked it to handle.
+# A takeover resumes from saved cursors only if the previous poller saved them
+# this recently. Older ones mean no channel session was running, and replaying
+# that backlog would flood the new session with messages nobody asked it to handle.
 RESUME_WINDOW = datetime.timedelta(minutes=10)
+# The poller re-saves unchanged cursors this often, so a quiet space still
+# looks alive to a takeover.
+CURSOR_HEARTBEAT = datetime.timedelta(minutes=1)
 
 
 class ChannelStore:
@@ -59,11 +62,7 @@ class ChannelStore:
         return json.loads(self.path.read_text()).get('spaces', {})
 
     def save(self, spaces: Dict[str, Dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix('.tmp')
-        tmp.write_text(json.dumps({'spaces': spaces}, indent=2))
-        os.chmod(tmp, 0o600)
-        tmp.replace(self.path)
+        write_private(self.path, json.dumps({'spaces': spaces}, indent=2))
 
 
 def mentions_bot(text: str) -> bool:
@@ -111,8 +110,8 @@ class Channel:
         # watching a space never replays history.
         self.cursors: Dict[str, str] = {}
         self._saved_cursors: Dict[str, str] = {}
+        self._saved_at: Optional[datetime.datetime] = None
         self._lock_fd: Optional[int] = None
-        self._self_id: Optional[str] = None
 
     def try_acquire(self) -> bool:
         """Become the poller if no other process is. The kernel drops the lock when this process exits."""
@@ -132,22 +131,24 @@ class Channel:
         return True
 
     def _resume_cursors(self) -> None:
+        # Cursors a standby set in watch() may be hours old; the previous poller's
+        # saved ones are authoritative, and a space without one starts from now.
+        self.cursors = {}
         if not self.cursor_path.exists():
             return
+        saved = json.loads(self.cursor_path.read_text())
+        saved_at = saved.get('saved_at')
         cutoff = datetime.datetime.now(datetime.timezone.utc) - RESUME_WINDOW
-        for space, ts in json.loads(self.cursor_path.read_text()).items():
-            if datetime.datetime.fromisoformat(ts) >= cutoff:
-                self.cursors[space] = ts
+        if saved_at and datetime.datetime.fromisoformat(saved_at) >= cutoff:
+            self.cursors.update(saved.get('cursors', {}))
 
     def _save_cursors(self) -> None:
         cursors = {s: ts for s, ts in self.cursors.items() if s in self.store.load()}
-        if cursors == self._saved_cursors:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if cursors == self._saved_cursors and self._saved_at and now - self._saved_at < CURSOR_HEARTBEAT:
             return
-        tmp = self.cursor_path.with_suffix('.tmp')
-        tmp.write_text(json.dumps(cursors))
-        os.chmod(tmp, 0o600)
-        tmp.replace(self.cursor_path)
-        self._saved_cursors = cursors
+        write_private(self.cursor_path, json.dumps({'saved_at': now.isoformat(), 'cursors': cursors}))
+        self._saved_cursors, self._saved_at = cursors, now
 
     def poller_status(self) -> Dict:
         if self._lock_fd is not None:
@@ -159,8 +160,11 @@ class Channel:
         if pid is not None:
             try:
                 os.kill(pid, 0)
-            except ProcessLookupError:
-                pid = None  # stale: the holder exited and nobody has taken over yet
+            except (ProcessLookupError, PermissionError):
+                # Stale: the holder exited and nobody has taken over yet. A reused
+                # PID owned by another user raises PermissionError; it cannot hold
+                # our owner-only lock file either.
+                pid = None
         return {'active_here': False, 'holder_pid': pid}
 
     def _now(self) -> str:
@@ -173,9 +177,7 @@ class Channel:
         return creds
 
     def self_id(self) -> str:
-        if self._self_id is None:
-            self._self_id = self_user_id(self._creds())
-        return self._self_id
+        return self_user_id(self._creds())
 
     def watch(self, space_name: str, allowed_senders: Optional[List[str]] = None,
               mention_only: bool = False) -> Dict:
@@ -233,8 +235,14 @@ class Channel:
                 out.append(to_notification(msg, space_name, sender_name))
         return out
 
-    async def run(self, write_stream) -> None:
-        """Poll forever, writing channel notifications straight to the stdio write stream."""
+    async def run(self, write_stream, initialized: anyio.Event) -> None:
+        """Poll forever, writing channel notifications straight to the stdio write stream.
+
+        Waits for the client's notifications/initialized first: a resumed cursor can
+        deliver on the very first poll, and a notification sent before the handshake
+        ends is outside the protocol, so the client may drop it.
+        """
+        await initialized.wait()
         while True:
             try:
                 # Blocks the event loop like every tool call here does. A worker
