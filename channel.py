@@ -22,7 +22,7 @@ import anyio
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 
-from google_chat import APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, _get_service
+from google_chat import APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text, _get_service
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def to_notification(msg: Dict, space_name: str, sender_name: str) -> Dict:
         'sender_name': sender_name,
         'ts': msg.get('createTime', ''),
     }
-    content = msg.get('text') or ''
+    content = message_text(msg)
     names = [a.get('contentName') for a in msg.get('attachment', []) if a.get('contentName')]
     if names:
         content += f"\n[attachments: {', '.join(names)}]"

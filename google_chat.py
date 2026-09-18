@@ -323,6 +323,74 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     return user_id
 
 
+# Google Chat markup in formattedText: labelled links, user mentions, custom
+# emoji. Anything else in angle brackets is literal text and stays as it is.
+_CHAT_MARKUP = re.compile(r'<(https?://[^|>]+)\|([^>]*)>|<(users/[^>]+)>|<customEmojis/(:[^>]+:)>')
+
+
+def _mention_names(msg: Dict) -> Dict[str, str]:
+    """Map users/ID to the @Name text each USER_MENTION annotation covers.
+
+    The annotated span of 'text' is what the sender saw, so it is used over the
+    annotation's displayName, which is missing for some users and reads
+    "Deleted User" for removed accounts. Annotation offsets count UTF-16 code
+    units, so an emoji before a mention would shift a str slice.
+    """
+    utf16 = (msg.get('text') or '').encode('utf-16-le')
+    names = {}
+    for a in msg.get('annotations', []):
+        if a.get('type') != 'USER_MENTION':
+            continue
+        user = a.get('userMention', {}).get('user', {})
+        # An @all mention carries an empty user.
+        key = user.get('name') or 'users/all'
+        start, length = a.get('startIndex', 0), a.get('length', 0)
+        span = utf16[start * 2:(start + length) * 2].decode('utf-16-le', 'replace')
+        if span.startswith('@'):
+            names[key] = span
+        elif user.get('displayName'):
+            names[key] = f"@{user['displayName']}"
+    return names
+
+
+def message_text(msg: Dict) -> str:
+    """Render a message's formattedText as readable markdown-ish text.
+
+    Google's plain 'text' drops every link target and turns custom emoji into
+    a replacement character; formattedText keeps them as Chat markup:
+    <url|label> becomes [label](url), <users/ID> becomes the @Name written in
+    the message (see _mention_names), including <users/all> (@all, @semua),
+    and <customEmojis/:name:> becomes :name:. Chat's own *bold*, _italic_ and
+    code markers are kept.
+    """
+    formatted = msg.get('formattedText')
+    if not formatted:
+        return msg.get('text') or ''
+    names = _mention_names(msg)
+
+    def render(m: re.Match) -> str:
+        url, label, user, emoji = m.groups()
+        if url:
+            return f'[{label or url}]({url})'
+        if user:
+            # users/all is written in the sender's language, e.g. @semua.
+            return names.get(user) or ('@all' if user == 'users/all' else f'@{user}')
+        return emoji
+
+    return _CHAT_MARKUP.sub(render, formatted)
+
+
+def _attachment_fields(a: Dict) -> Dict:
+    fields = {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
+              'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
+    # Drive attachments have no downloadable resourceName; the file ID lets a
+    # Drive tool open them.
+    drive_id = a.get('driveDataRef', {}).get('driveFileId')
+    if drive_id:
+        fields['driveFileId'] = drive_id
+    return fields
+
+
 def _sender_fields(msg: Dict, creds: Credentials) -> Dict:
     """Sender fields for filtered output.
 
@@ -434,16 +502,12 @@ def _compact_message(msg: Dict, creds: Credentials, space_name: str) -> Dict:
     out['time'] = _short_time(msg.get('createTime'))
     if msg.get('lastUpdateTime'):
         out['edited'] = _short_time(msg['lastUpdateTime'])
-    out['text'] = msg.get('text') or ''
+    out['text'] = message_text(msg)
     quoted = msg.get('quotedMessageMetadata', {}).get('name')
     if quoted:
         out['quoted'] = quoted.removeprefix(prefix)
     if msg.get('attachment'):
-        out['attachment'] = [
-            {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
-             'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
-            for a in msg['attachment']
-        ]
+        out['attachment'] = [_attachment_fields(a) for a in msg['attachment']]
     if msg.get('emojiReactionSummaries'):
         out['reactions'] = {}
         for r in msg['emojiReactionSummaries']:
@@ -687,7 +751,7 @@ async def search_space_messages(query: str,
             'space': space,
             **_sender_fields(msg, creds),
             'createTime': msg.get('createTime'),
-            'text': msg.get('text'),
+            'text': message_text(msg),
             'thread': msg.get('thread'),
         })
 
@@ -841,18 +905,14 @@ async def get_message(message_name: str) -> Dict:
             **_sender_fields(msg, creds),
             'createTime': msg.get('createTime'),
             'lastUpdateTime': msg.get('lastUpdateTime'),
-            'text': msg.get('text'),
+            'text': message_text(msg),
             'thread': msg.get('thread'),
         }
         if msg.get('quotedMessageMetadata'):
             result['quotedMessageMetadata'] = msg['quotedMessageMetadata']
         result['threadReply'] = msg.get('threadReply', False)
         if msg.get('attachment'):
-            result['attachment'] = [
-                {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
-                 'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
-                for a in msg['attachment']
-            ]
+            result['attachment'] = [_attachment_fields(a) for a in msg['attachment']]
         if msg.get('emojiReactionSummaries'):
             result['emojiReactionSummaries'] = msg['emojiReactionSummaries']
         return result

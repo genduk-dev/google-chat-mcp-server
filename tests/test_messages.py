@@ -96,5 +96,58 @@ class ListSpaceMessagesTest(unittest.TestCase):
         self.assertNotIn('root', m)
 
 
+
+class MessageTextTest(unittest.TestCase):
+    def test_labelled_link_is_rendered_as_markdown(self):
+        m = {'text': 'Pisang -> kalau ini kebaca?',
+             'formattedText': '<https://pisang.example/q#abc|Pisang> -> kalau ini kebaca?'}
+        self.assertEqual(google_chat.message_text(m), '[Pisang](https://pisang.example/q#abc) -> kalau ini kebaca?')
+
+    def test_mentions_use_the_name_written_in_the_message(self):
+        # The emoji before the mention is two UTF-16 units, which is how Chat counts offsets,
+        # and the annotation's displayName is stale for a removed account.
+        m = {'text': '🎣 @Andri @all see Notes',
+             'formattedText': '🎣 <users/42> <users/all> see <https://docs.google.com/d/1/edit|Notes>',
+             'annotations': [{'type': 'USER_MENTION', 'startIndex': 3, 'length': 6,
+                              'userMention': {'user': {'name': 'users/42', 'displayName': 'Deleted User'}}}]}
+        self.assertEqual(google_chat.message_text(m), '🎣 @Andri @all see [Notes](https://docs.google.com/d/1/edit)')
+
+    def test_mention_falls_back_to_display_name_when_the_span_is_not_a_mention(self):
+        m = {'text': 'hi', 'formattedText': 'hi <users/42>',
+             'annotations': [{'type': 'USER_MENTION', 'startIndex': 0, 'length': 2,
+                              'userMention': {'user': {'name': 'users/42', 'displayName': 'Andri'}}}]}
+        self.assertEqual(google_chat.message_text(m), 'hi @Andri')
+
+    def test_all_mention_keeps_the_senders_wording(self):
+        m = {'text': 'hi @semua', 'formattedText': 'hi <users/all>',
+             'annotations': [{'type': 'USER_MENTION', 'startIndex': 3, 'length': 6,
+                              'userMention': {'user': {}}}]}
+        self.assertEqual(google_chat.message_text(m), 'hi @semua')
+
+    def test_mention_without_a_display_name_keeps_the_user_id(self):
+        self.assertEqual(google_chat.message_text({'formattedText': 'hi <users/42>'}), 'hi @users/42')
+
+    def test_repeated_labels_keep_their_own_links(self):
+        m = {'text': 'here or here', 'formattedText': 'here or <https://x/2|here>'}
+        self.assertEqual(google_chat.message_text(m), 'here or [here](https://x/2)')
+
+    def test_custom_emoji_is_named_instead_of_a_replacement_char(self):
+        m = {'text': 'thanks \ufffd', 'formattedText': 'thanks <customEmojis/:sungkem:>'}
+        self.assertEqual(google_chat.message_text(m), 'thanks :sungkem:')
+
+    def test_chat_formatting_and_literal_brackets_are_kept(self):
+        m = {'text': 'use <b> tag', 'formattedText': '*use* `<b>` tag'}
+        self.assertEqual(google_chat.message_text(m), '*use* `<b>` tag')
+
+    def test_message_without_formatted_text_falls_back_to_text(self):
+        self.assertEqual(google_chat.message_text({'text': 'plain'}), 'plain')
+        self.assertEqual(google_chat.message_text({}), '')
+
+    def test_drive_attachment_carries_its_file_id(self):
+        a = {'contentName': 'Notes', 'contentType': 'application/vnd.google-apps.document',
+             'driveDataRef': {'driveFileId': 'F1'}, 'source': 'DRIVE_FILE'}
+        self.assertEqual(google_chat._attachment_fields(a)['driveFileId'], 'F1')
+        self.assertNotIn('driveFileId', google_chat._attachment_fields({'attachmentDataRef': {'resourceName': 'R'}}))
+
 if __name__ == '__main__':
     unittest.main()
