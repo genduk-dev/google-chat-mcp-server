@@ -318,7 +318,10 @@ def run_channel(args) -> None:
         return channel.unwatch(space_name)
 
     def list_watched_spaces() -> Dict:
-        """List the watched Google Chat spaces and the senders allowed through for each."""
+        """List the channel config: the bot name and its @mention, the message ID prefix
+        that marks this server's own messages, and each watched space with its allowed
+        senders and mention_only setting. The bot name comes from the BOT_NAME env var
+        and cannot be changed by a tool."""
         return channel.list_watched()
 
     for fn in (watch_space, unwatch_space, list_watched_spaces):

@@ -138,7 +138,11 @@ class Channel:
         return {'space_name': space_name, 'removed': removed}
 
     def list_watched(self) -> Dict:
-        return {'spaces': [{'space_name': s, **config} for s, config in self.store.load().items()]}
+        # BOT_NAME is fixed per process (an env var), so it is reported here but
+        # changed only by restarting every server that shares the spaces.
+        return {'bot_name': BOT_NAME, 'mention': f'@{BOT_NAME}',
+                'message_id_prefix': APP_MESSAGE_PREFIX,
+                'spaces': [{'space_name': s, **config} for s, config in self.store.load().items()]}
 
     def poll_once(self) -> List[Dict]:
         """Fetch new messages from every watched space and return the notifications to send."""

@@ -150,10 +150,17 @@ class PollTest(unittest.TestCase):
             result = ch.watch(SPACE)
         self.assertEqual(result['allowed_senders'], [OWNER])
         self.assertFalse(result['mention_only'])
-        self.assertEqual(ch.list_watched(),
-                         {'spaces': [{'space_name': SPACE, 'allowed_senders': [OWNER], 'mention_only': False}]})
+        self.assertEqual(ch.list_watched()['spaces'],
+                         [{'space_name': SPACE, 'allowed_senders': [OWNER], 'mention_only': False}])
         self.assertEqual(ch.unwatch(SPACE), {'space_name': SPACE, 'removed': True})
-        self.assertEqual(ch.list_watched(), {'spaces': []})
+        self.assertEqual(ch.list_watched()['spaces'], [])
+
+    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
+    @mock.patch.object(channel, 'APP_MESSAGE_PREFIX', 'client-genduk-')
+    def test_list_watched_reports_the_bot_identity(self):
+        listed = Channel(self.store, 5).list_watched()
+        self.assertEqual((listed['bot_name'], listed['mention'], listed['message_id_prefix']),
+                         ('genduk', '@genduk', 'client-genduk-'))
 
 
 if __name__ == '__main__':
