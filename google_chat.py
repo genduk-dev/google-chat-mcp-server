@@ -86,6 +86,8 @@ def _parse_bot_name(raw: str) -> str:
 # One name identifies the bot twice: the clientAssignedMessageId prefix that
 # marks messages this server sent, and the @mention the channel listens for.
 BOT_NAME = _parse_bot_name(os.environ.get('BOT_NAME', 'gchat-mcp'))
+# The name as written, for display. BOT_NAME is its lowercased ID form.
+BOT_DISPLAY_NAME = os.environ.get('BOT_NAME', 'gchat-mcp').strip()
 APP_MESSAGE_PREFIX = f'client-{BOT_NAME}-'
 
 # Store credentials info
@@ -310,6 +312,25 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
     return user_id
 
 
+def _sender_fields(msg: Dict, creds: Credentials) -> Dict:
+    """Sender fields for filtered output.
+
+    Messages this server sent go out as the authenticated user, so Google
+    reports that user as a HUMAN sender. They are attributed to the bot here so
+    a reader can tell the bot's turns from the user's. --raw-messages keeps
+    Google's own sender.
+    """
+    client_msg_id = msg.get('clientAssignedMessageId', '')
+    if client_msg_id.startswith(APP_MESSAGE_PREFIX):
+        return {'sender': BOT_DISPLAY_NAME, 'sender_type': 'BOT', 'sent_by_app': True}
+    sender = msg.get('sender', {})
+    return {
+        'sender': get_user_display_name(sender, creds) if sender else 'Unknown',
+        'sender_type': sender.get('type', 'HUMAN'),
+        'sent_by_app': False,
+    }
+
+
 async def list_space_members(space_name: str) -> List[Dict]:
     """List all members of a space with their user IDs and display names.
 
@@ -450,15 +471,9 @@ async def list_space_messages(space_name: str,
 
         filtered_messages = []
         for msg in messages:
-            sender = msg.get('sender', {})
-            display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
-
-            client_msg_id = msg.get('clientAssignedMessageId', '')
             filtered_msg = {
                 'name': msg.get('name'),
-                'sender': display_name,
-                'sender_type': sender.get('type', 'HUMAN'),
-                'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
+                **_sender_fields(msg, creds),
                 'createTime': msg.get('createTime'),
                 'lastUpdateTime': msg.get('lastUpdateTime'),
                 'text': msg.get('text'),
@@ -617,17 +632,12 @@ async def search_space_messages(query: str,
 
     filtered_messages = []
     for msg in results:
-        sender = msg.get('sender', {})
-        display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
-        client_msg_id = msg.get('clientAssignedMessageId', '')
         name = msg.get('name', '')
         space = msg.get('space', {}).get('name') or '/'.join(name.split('/')[:2])
         filtered_messages.append({
             'name': name,
             'space': space,
-            'sender': display_name,
-            'sender_type': sender.get('type', 'HUMAN'),
-            'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
+            **_sender_fields(msg, creds),
             'createTime': msg.get('createTime'),
             'text': msg.get('text'),
             'thread': msg.get('thread'),
@@ -778,15 +788,9 @@ async def get_message(message_name: str) -> Dict:
         if not FILTER_MESSAGES:
             return msg
 
-        sender = msg.get('sender', {})
-        display_name = get_user_display_name(sender, creds) if sender else 'Unknown'
-
-        client_msg_id = msg.get('clientAssignedMessageId', '')
         result = {
             'name': msg.get('name'),
-            'sender': display_name,
-            'sender_type': sender.get('type', 'HUMAN'),
-            'sent_by_app': client_msg_id.startswith(APP_MESSAGE_PREFIX) if client_msg_id else False,
+            **_sender_fields(msg, creds),
             'createTime': msg.get('createTime'),
             'lastUpdateTime': msg.get('lastUpdateTime'),
             'text': msg.get('text'),

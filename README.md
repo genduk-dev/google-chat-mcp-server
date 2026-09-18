@@ -107,7 +107,7 @@ Resource name formats:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BOT_NAME` | `gchat-mcp` | Bot identity. App-sent messages get the `clientAssignedMessageId` prefix `client-{BOT_NAME}-`, and channel spaces watched with `mention_only` react to `@{BOT_NAME}` (case-insensitive). Lowercased, then limited to 1-43 letters, digits, or hyphens so the ID stays valid for Google Chat |
+| `BOT_NAME` | `gchat-mcp` | Bot identity. App-sent messages get the `clientAssignedMessageId` prefix `client-{BOT_NAME}-`, and channel spaces watched with `mention_only` react to `@{BOT_NAME}` (case-insensitive). Read tools report those messages with `sender` set to `BOT_NAME` as written and `sender_type` `BOT`; `--raw-messages` keeps Google's own sender. Lowercased, then limited to 1-43 letters, digits, or hyphens so the ID stays valid for Google Chat |
 
 ## Docker
 

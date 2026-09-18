@@ -72,6 +72,22 @@ class BotNameTest(unittest.TestCase):
         self.assertEqual(len(f"client-{_parse_bot_name('x' * 43)}-{'0' * 12}"), 63)
 
 
+class SenderFieldsTest(unittest.TestCase):
+    def test_own_message_is_attributed_to_the_bot(self):
+        import google_chat
+        with mock.patch.object(google_chat, 'BOT_DISPLAY_NAME', 'Genduk'), \
+                mock.patch.object(google_chat, 'get_user_display_name') as lookup:
+            fields = google_chat._sender_fields(message('m1', client_id=f'{APP_MESSAGE_PREFIX}abc'), None)
+        self.assertEqual(fields, {'sender': 'Genduk', 'sender_type': 'BOT', 'sent_by_app': True})
+        lookup.assert_not_called()
+
+    def test_human_message_keeps_its_sender(self):
+        import google_chat
+        with mock.patch.object(google_chat, 'get_user_display_name', return_value='Husni'):
+            fields = google_chat._sender_fields(message('m1'), None)
+        self.assertEqual(fields, {'sender': 'Husni', 'sender_type': 'HUMAN', 'sent_by_app': False})
+
+
 class StoreTest(unittest.TestCase):
     def test_round_trip_and_owner_only_permissions(self):
         with tempfile.TemporaryDirectory() as d:
