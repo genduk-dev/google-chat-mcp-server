@@ -596,7 +596,8 @@ def _member_fields(membership: Dict) -> Dict:
     user_id = member.get('name', '')
     return {
         'user_id': user_id,
-        'display_name': _user_display_name_cache.get(user_id, member.get('displayName') or user_id),
+        'display_name': (_user_display_name_cache.get(user_id) or member.get('displayName')
+                         or user_names().get(user_id) or user_id),
         'mention': f'<{user_id}>',
         'type': member.get('type', 'HUMAN'),
         'role': membership.get('role', 'ROLE_MEMBER'),

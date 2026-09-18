@@ -168,6 +168,11 @@ class UserNamesTest(unittest.TestCase):
         os.utime(path, ns=(2 * 10**18, 2 * 10**18))
         self.assertEqual(self.name({'name': 'users/9'}), 'users/9')
 
+    def test_member_listing_uses_the_saved_name_too(self):
+        google_chat.set_user_name('users/9', 'Budi')
+        fields = google_chat._member_fields({'member': {'name': 'users/9', 'type': 'HUMAN'}})
+        self.assertEqual(fields['display_name'], 'Budi')
+
     def test_empty_name_removes_and_bad_ids_are_rejected(self):
         google_chat.set_user_name('users/9', 'Budi')
         self.assertEqual(google_chat.set_user_name('users/9', ' ')['saved_names'], 0)
