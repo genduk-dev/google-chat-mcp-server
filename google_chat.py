@@ -656,6 +656,27 @@ def space_link(space_name: str, creds: Credentials) -> str:
     return _space_links[space_name]
 
 
+def _cache_space_links(space_names, creds: Credentials) -> None:
+    """Fill the link cache for many spaces with one spaces.list instead of a get each."""
+    if len(set(space_names) - set(_space_links)) <= 1:
+        return  # space_link fetches a single missing one itself
+    service = _get_service('chat', 'v1', creds)
+    page_token = None
+    while True:
+        response = service.spaces().list(pageSize=1000, **({'pageToken': page_token} if page_token else {})).execute()
+        for space in response.get('spaces', []):
+            _link(space)
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
+
+
+def message_link(message_name: str, creds: Credentials) -> str:
+    """spaces/S/messages/T.M -> {space link}/T/M, as the Chat app links a message."""
+    space_name, _, message_id = message_name.partition('/messages/')
+    return f"{space_link(space_name, creds)}/{message_id.replace('.', '/', 1)}"
+
+
 async def list_chat_spaces(query: Optional[str] = None, space_type: Optional[str] = None,
                            limit: int = 100) -> Dict:
     """The user's spaces, most recently active first, one short entry each.
@@ -1094,12 +1115,14 @@ async def search_space_messages(query: str,
         return {'messages': results, 'nextPageToken': next_token}
 
     filtered_messages = []
+    _cache_space_links([m.get('name', '').partition('/messages/')[0] for m in results], creds)
     for msg in results:
         name = msg.get('name', '')
         space = msg.get('space', {}).get('name') or '/'.join(name.split('/')[:2])
         filtered_messages.append({
             'name': name,
             'space': space,
+            'link': message_link(name, creds),
             **_sender_fields(msg, creds),
             'createTime': msg.get('createTime'),
             'text': message_text(msg),
@@ -1574,7 +1597,7 @@ async def list_pinned_messages(space_name: str) -> Dict:
             # Pinned, but this user can no longer read it; say so instead of dropping it.
             out.append({'id': msg['name'].removeprefix(f"{space_name}/messages/"), 'unavailable': msg['error']})
         else:
-            out.append(_compact_message(msg, creds, space_name))
+            out.append({**_compact_message(msg, creds, space_name), 'link': message_link(msg['name'], creds)})
     return {'space': space_name, 'pins': out}
 
 

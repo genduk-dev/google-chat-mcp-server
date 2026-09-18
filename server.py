@@ -190,8 +190,9 @@ async def search_messages(query: str,
         page_token: nextPageToken from a previous call, to fetch the next page
 
     Returns:
-        {'messages': [...], 'nextPageToken': str or None} — nextPageToken is None
-        when there are no further results
+        {'messages': [{'name', 'space', 'link', 'sender', ..., 'text', 'thread'}],
+        'nextPageToken': str or None} — "link" opens the message in Google Chat;
+        nextPageToken is None when there are no further results
 
     Raises:
         Exception: If not authenticated, or if the search API is unavailable
@@ -513,7 +514,7 @@ async def list_pinned_messages(space_name: str) -> str:
     """List the pinned messages of a space, with their content.
 
     Returns:
-        {"space", "pins": [message]}, each message in get_messages' format; a pin whose
+        {"space", "pins": [message]}, each message in get_messages' format plus its "link"; a pin whose
         message you can no longer read is {"id", "unavailable": HTTP status}
     """
     from google_chat import list_pinned_messages as _list

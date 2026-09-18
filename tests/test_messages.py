@@ -96,6 +96,20 @@ class ListSpaceMessagesTest(unittest.TestCase):
         self.run_list(limit=5)
         self.assertEqual(self.chat.spaces().get.return_value.execute.call_count, 1)   # cached
 
+    def test_message_link_matches_the_chat_app(self):
+        google_chat._space_links['spaces/jfQ'] = 'https://chat.google.com/dm/jfQ'
+        self.assertEqual(google_chat.message_link('spaces/jfQ/messages/QwV.Abc', None),
+                         'https://chat.google.com/dm/jfQ/QwV/Abc')
+
+    def test_many_uncached_spaces_are_linked_by_one_list_call(self):
+        self.chat.spaces().list.return_value.execute.return_value = {'spaces': [
+            {'name': 'spaces/A', 'spaceUri': 'https://chat.google.com/room/A?cls=11'},
+            {'name': 'spaces/B', 'spaceUri': 'https://chat.google.com/dm/B?cls=11'}]}
+        google_chat._cache_space_links(['spaces/A', 'spaces/B', 'spaces/A'], None)
+        self.assertEqual(google_chat._space_links, {'spaces/A': 'https://chat.google.com/room/A',
+                                                    'spaces/B': 'https://chat.google.com/dm/B'})
+        self.chat.spaces().get.assert_not_called()
+
     def test_after_filter_and_more_flag(self):
         self.pages = [{'messages': [msg('m2'), msg('m1')], 'nextPageToken': 'older'}]
         result = self.run_list(limit=2, after='2026-09-18T09:00:00Z')
