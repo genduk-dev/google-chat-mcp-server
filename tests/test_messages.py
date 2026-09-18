@@ -21,7 +21,6 @@ class ListSpaceMessagesTest(unittest.TestCase):
             execute=mock.Mock(return_value=self.pages.pop(0)))
         for target, kw in [('get_credentials', {'return_value': object()}),
                            ('_get_service', {'return_value': self.chat}),
-                           ('prefetch_space_members', {}),
                            ('get_user_display_name', {'return_value': 'Husni'})]:
             p = mock.patch.object(google_chat, target, **kw)
             p.start()

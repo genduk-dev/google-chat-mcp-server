@@ -631,8 +631,8 @@ async def list_space_messages(space_name: str,
         if not FILTER_MESSAGES:
             return messages
 
-        prefetch_space_members(space_name, creds)
-
+        # Senders' names come with the messages; members.list added a request per call
+        # without naming anyone the messages did not already name.
         threads: Dict[str, List[Dict]] = {}
         for msg in messages:
             key = msg.get('thread', {}).get('name', '')
