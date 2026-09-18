@@ -107,7 +107,7 @@ def run_cli_auth(credentials_path: str = 'credentials.json'):
     creds_file = Path(credentials_path)
     if not creds_file.exists():
         print(f"ERROR: {credentials_path} not found.")
-        print("Please download it from Google Cloud Console and save it in the current directory.")
+        print("Download the OAuth client JSON from Google Cloud Console and save it at that path.")
         return
 
     # Use OOB-style redirect for manual code entry

@@ -765,7 +765,9 @@ if __name__ == "__main__":
         print("-" * 50)
         run_auth_server(port=args.port, host=args.host)
     elif args.auth == 'cli':
-        run_cli_auth()
+        # Same place the authenticate tool looks: credentials.json beside the token.
+        from pathlib import Path
+        run_cli_auth(str(Path(args.token_path).expanduser().parent / 'credentials.json'))
     elif args.channel:
         run_channel(args)
     else:
