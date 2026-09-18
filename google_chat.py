@@ -1075,14 +1075,16 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
         raise Exception(f"Failed to download attachment: {str(e)}")
 
 
-def start_authentication(credentials_path: str = 'credentials.json') -> str:
+def start_authentication(credentials_path: Optional[str] = None) -> str:
     """Starts an OAuth authentication flow and returns the authorization URL.
 
     The user should open the URL, complete authorization, then pass the resulting
     callback URL to complete_authentication() to finish the flow.
 
     Args:
-        credentials_path: Path to the OAuth client credentials.json file
+        credentials_path: Path to the OAuth client credentials.json file. If None, uses
+                          credentials.json next to the configured token file, since an MCP
+                          client usually launches the server from an unrelated directory.
 
     Returns:
         The authorization URL for the user to open in a browser
@@ -1092,6 +1094,8 @@ def start_authentication(credentials_path: str = 'credentials.json') -> str:
     """
     global _pending_auth_flow
 
+    if credentials_path is None:
+        credentials_path = str(Path(token_info['token_path']).parent / 'credentials.json')
     creds_file = Path(credentials_path)
     if not creds_file.exists():
         raise Exception(
