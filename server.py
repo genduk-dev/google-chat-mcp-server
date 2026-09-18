@@ -1,5 +1,6 @@
 # server.py
 import argparse
+import json
 from typing import List, Dict
 
 from fastmcp import FastMCP
@@ -22,40 +23,56 @@ async def get_spaces() -> List[Dict]:
 
 @mcp.tool()
 async def get_messages(space_name: str,
-                       start_date: str,
-                       end_date: str = None) -> List[Dict]:
-    """List messages from a specific Google Chat space with optional time filtering.
+                       start_date: str = None,
+                       end_date: str = None,
+                       thread_name: str = None,
+                       limit: int = None) -> str:
+    """List messages from a Google Chat space, by date, by thread, or the latest N.
 
-    This tool requires OAuth authentication. The space_name should be in the format
-    'spaces/your_space_id'. Dates should be in YYYY-MM-DD format (e.g., '2024-03-22').
+    Give at least one of start_date, thread_name or limit; they combine.
+    - start_date alone covers that whole day (UTC); with end_date, start_date 00:00:00Z
+      to end_date 23:59:59Z. Dates are YYYY-MM-DD.
+    - thread_name returns that whole thread, including a root posted months ago, in one
+      request. Take it from a message's thread or a channel event's thread_name.
+    - limit returns only the most recent N matching messages (1-1000).
 
-    When only start_date is provided, it will query messages for that entire day.
-    When both dates are provided, it will query messages from start_date 00:00:00Z
-    to end_date 23:59:59Z.
+    Returns one object, grouped by thread to save tokens:
+        {"space": "spaces/S",
+         "threads": [{"thread": "spaces/S/threads/T",
+                      "messages": [{"id": "T.M", "sender": "...", "time": "...", "text": "..."}]}],
+         "truncated": true}   # only when more than 1000 messages matched
+    Threads are ordered by their first returned message, messages oldest first.
+    A message's full name is "{space}/messages/{id}"; use it for get_message, reactions,
+    quote replies and attachments. Pass a group's "thread" as send_message's thread_name
+    to reply in it. Optional message fields appear only when set: sender_type (when not
+    HUMAN), sent_by_app, edited, quoted, attachment, reactions ({emoji: count}).
 
     Args:
-        space_name: The name/identifier of the space to fetch messages from
-        start_date: Required start date in YYYY-MM-DD format
-        end_date: Optional end date in YYYY-MM-DD format
-
-    Returns:
-        List of message objects from the space matching the time criteria
+        space_name: The space to fetch messages from ('spaces/SPACE_ID')
+        start_date: Optional start date in YYYY-MM-DD format
+        end_date: Optional end date in YYYY-MM-DD format, only used with start_date
+        thread_name: Optional thread of this space ('spaces/SPACE_ID/threads/THREAD_ID')
+        limit: Optional number of most recent matching messages to return
 
     Raises:
-        ValueError: If the date format is invalid or dates are in wrong order
+        ValueError: If no filter is given, a date is malformed, dates are in the wrong
+                    order, thread_name belongs to another space, or limit is out of range
     """
     from google_chat import list_space_messages
     from datetime import datetime, timezone
 
-    try:
-        # Parse start date and set to beginning of day (00:00:00Z)
-        start_datetime = datetime.strptime(start_date, '%Y-%m-%d').replace(
-            hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
-        )
+    if not (start_date or thread_name or limit):
+        raise ValueError("Give at least one of start_date, thread_name or limit")
 
+    start_datetime = end_datetime = None
+    try:
+        if start_date:
+            # Parse start date and set to beginning of day (00:00:00Z)
+            start_datetime = datetime.strptime(start_date, '%Y-%m-%d').replace(
+                hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+            )
         # Parse end date if provided and set to end of day (23:59:59Z)
-        end_datetime = None
-        if end_date:
+        if start_date and end_date:
             end_datetime = datetime.strptime(end_date, '%Y-%m-%d').replace(
                 hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc
             )
@@ -64,11 +81,14 @@ async def get_messages(space_name: str,
             if start_datetime > end_datetime:
                 raise ValueError("start_date must be before end_date")
     except ValueError as e:
-        if "strptime" in str(e):
+        if "strptime" in str(e) or "does not match format" in str(e):
             raise ValueError("Dates must be in YYYY-MM-DD format (e.g., '2024-03-22')")
         raise e
 
-    return await list_space_messages(space_name, start_datetime, end_datetime)
+    result = await list_space_messages(space_name, start_datetime, end_datetime, thread_name, limit)
+    # FastMCP's own serialization escapes non-ASCII (emoji, CJK) as \uXXXX and pads
+    # separators, which costs tokens on every message.
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
 @mcp.tool()
 async def search_messages(query: str,

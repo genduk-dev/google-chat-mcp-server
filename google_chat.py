@@ -411,98 +411,128 @@ async def list_chat_spaces() -> List[Dict]:
     except Exception as e:
         raise Exception(f"Failed to list chat spaces: {str(e)}") 
 
-async def list_space_messages(space_name: str, 
-                            start_date: Optional[datetime.datetime] = None,
-                            end_date: Optional[datetime.datetime] = None) -> List[Dict]:
-    """Lists messages from a specific Google Chat space with optional time filtering.
-    
+def _short_time(ts: Optional[str]) -> Optional[str]:
+    """'2026-09-18T09:24:19.953311Z' -> '2026-09-18T09:24:19Z'."""
+    return ts.split('.')[0].rstrip('Z') + 'Z' if ts else ts
+
+
+def _compact_message(msg: Dict, creds: Credentials, space_name: str) -> Dict:
+    """One message for grouped output: fields that are empty or implied by the group are left out."""
+    prefix = f"{space_name}/messages/"
+    out = {'id': msg.get('name', '').removeprefix(prefix)}
+    fields = _sender_fields(msg, creds)
+    out['sender'] = fields['sender']
+    if fields['sender_type'] != 'HUMAN':
+        out['sender_type'] = fields['sender_type']
+    if fields['sent_by_app']:
+        out['sent_by_app'] = True
+    out['time'] = _short_time(msg.get('createTime'))
+    if msg.get('lastUpdateTime'):
+        out['edited'] = _short_time(msg['lastUpdateTime'])
+    out['text'] = msg.get('text') or ''
+    quoted = msg.get('quotedMessageMetadata', {}).get('name')
+    if quoted:
+        out['quoted'] = quoted.removeprefix(prefix)
+    if msg.get('attachment'):
+        out['attachment'] = [
+            {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
+             'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
+            for a in msg['attachment']
+        ]
+    if msg.get('emojiReactionSummaries'):
+        out['reactions'] = {r.get('emoji', {}).get('unicode', '?'): r.get('reactionCount', 0)
+                            for r in msg['emojiReactionSummaries']}
+    return out
+
+
+async def list_space_messages(space_name: str,
+                              start_date: Optional[datetime.datetime] = None,
+                              end_date: Optional[datetime.datetime] = None,
+                              thread_name: Optional[str] = None,
+                              limit: Optional[int] = None):
+    """Lists messages from a Google Chat space, filtered by time and/or thread.
+
     Args:
-        space_name: The name/identifier of the space to fetch messages from
-        start_date: Optional start datetime for filtering messages. If provided without end_date,
-                   will query messages for the entire day of start_date
-        end_date: Optional end datetime for filtering messages. Only used if start_date is also provided
-    
+        space_name: The space to fetch messages from ('spaces/SPACE_ID')
+        start_date: Optional start datetime. Without end_date, covers that whole day
+        end_date: Optional end datetime, only used with start_date
+        thread_name: Optional 'spaces/SPACE_ID/threads/THREAD_ID'; Google filters server-side,
+                     so an old thread costs one request however many messages came after it
+        limit: Optional number of most recent matching messages to return (1-1000)
+
     Returns:
-        List of message objects from the space matching the time criteria
-        
+        With filtering on: {'space', 'threads': [{'thread', 'messages': [...]}], 'truncated'?},
+        threads ordered by their first returned message, messages oldest first.
+        With --raw-messages: the raw message list.
+
     Raises:
         Exception: If authentication fails or API request fails
     """
+    if thread_name and not thread_name.startswith(f"{space_name}/threads/"):
+        raise ValueError(f"thread_name must be a thread of {space_name} ('{space_name}/threads/THREAD_ID')")
+    if limit is not None and not 1 <= limit <= MAX_MESSAGES:
+        raise ValueError(f"limit must be between 1 and {MAX_MESSAGES}")
     try:
         creds = get_credentials()
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
-            
+
         service = _get_service('chat', 'v1', creds)
-        
-        # Prepare filter string based on provided dates
-        filter_str = None
+
+        filters = []
         if start_date:
             if end_date:
-                # Format for date range query
-                filter_str = f"createTime > \"{start_date.isoformat()}\" AND createTime < \"{end_date.isoformat()}\""
+                filters.append(f"createTime > \"{start_date.isoformat()}\" AND createTime < \"{end_date.isoformat()}\"")
             else:
-                # For single day query, set range from start of day to end of day
                 day_start = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
                 day_end = day_start + datetime.timedelta(days=1)
-                filter_str = f"createTime > \"{day_start.isoformat()}\" AND createTime < \"{day_end.isoformat()}\""
-        
-        # Make API request with pagination
+                filters.append(f"createTime > \"{day_start.isoformat()}\" AND createTime < \"{day_end.isoformat()}\"")
+        if thread_name:
+            filters.append(f"thread.name = {thread_name}")
+
+        # With a limit, read newest first so the API stops after the last N.
+        wanted = limit or MAX_MESSAGES
         messages = []
         page_token = None
-        
+        truncated = False
         while True:
-            list_args = {
-                'parent': space_name,
-                'pageSize': 100
-            }
-            if filter_str:
-                list_args['filter'] = filter_str
+            list_args = {'parent': space_name, 'pageSize': min(wanted - len(messages), 1000)}
+            if filters:
+                list_args['filter'] = ' AND '.join(filters)
+            if limit:
+                list_args['orderBy'] = 'createTime DESC'
             if page_token:
                 list_args['pageToken'] = page_token
-                
             response = service.spaces().messages().list(**list_args).execute()
-            
-            # Extend messages list with current page results
-            current_page_messages = response.get('messages', [])
-            if current_page_messages:
-                messages.extend(current_page_messages)
-
+            messages.extend(response.get('messages', []))
             page_token = response.get('nextPageToken')
-            if not page_token or len(messages) >= MAX_MESSAGES:
+            if not page_token:
                 break
+            if len(messages) >= wanted:
+                # Hitting a caller's limit is expected; hitting the cap is not.
+                truncated = not limit
+                break
+        if limit:
+            messages.reverse()
 
         if not FILTER_MESSAGES:
             return messages
 
-        # Prefetch space members to resolve display names
         prefetch_space_members(space_name, creds)
 
-        filtered_messages = []
+        threads: Dict[str, List[Dict]] = {}
         for msg in messages:
-            filtered_msg = {
-                'name': msg.get('name'),
-                **_sender_fields(msg, creds),
-                'createTime': msg.get('createTime'),
-                'lastUpdateTime': msg.get('lastUpdateTime'),
-                'text': msg.get('text'),
-                'thread': msg.get('thread')
-            }
-            if msg.get('quotedMessageMetadata'):
-                filtered_msg['quotedMessageMetadata'] = msg['quotedMessageMetadata']
-            filtered_msg['threadReply'] = msg.get('threadReply', False)
-            if msg.get('attachment'):
-                filtered_msg['attachment'] = [
-                    {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
-                     'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
-                    for a in msg['attachment']
-                ]
-            if msg.get('emojiReactionSummaries'):
-                filtered_msg['emojiReactionSummaries'] = msg['emojiReactionSummaries']
-            filtered_messages.append(filtered_msg)
+            key = msg.get('thread', {}).get('name', '')
+            threads.setdefault(key, []).append(_compact_message(msg, creds, space_name))
 
-        return filtered_messages
-        
+        result = {'space': space_name,
+                  'threads': [{'thread': t, 'messages': msgs} for t, msgs in threads.items()]}
+        if truncated:
+            result['truncated'] = True
+        return result
+
+    except ValueError:
+        raise
     except Exception as e:
         raise Exception(f"Failed to list messages in space: {str(e)}")
 
