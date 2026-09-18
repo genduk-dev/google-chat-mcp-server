@@ -117,14 +117,38 @@ def parse_verdict(msg: Dict, allowed_senders: List[str]) -> Optional[Tuple[str, 
     return m.group(2).lower(), 'allow' if m.group(1).lower().startswith('y') else 'deny'
 
 
+# Chat rejects messages over 4,096 characters; the preview gets what the rest leaves.
+PROMPT_DESCRIPTION_CHARS = 200
+PROMPT_PREVIEW_CHARS = 3000
+
+
+def _summary(description: str) -> str:
+    """For an MCP tool Claude Code sends its whole docstring; keep the first sentence."""
+    if len(description) <= PROMPT_DESCRIPTION_CHARS:
+        return description
+    head = description[:PROMPT_DESCRIPTION_CHARS]
+    end = head.find('. ')
+    return head[:end + 1] if end > 0 else head.rstrip() + '…'
+
+
+def _middle_cut(text: str, limit: int) -> str:
+    """Keep both ends: the end of a long command matters as much as its start."""
+    if len(text) <= limit:
+        return text
+    half = (limit - 30) // 2
+    return f"{text[:half]} ⋯ {len(text) - 2 * half} chars cut ⋯ {text[-half:]}"
+
+
 def permission_prompt(params: Dict) -> str:
     """The Chat message for a permission request. Both fields are untrusted, so they
     go in code, where Chat shows mention and link markup literally."""
     def code(text: str) -> str:
         return text.replace('`', "'")
     rid = params['request_id']
-    return (f"🔐 Claude wants to use `{code(params.get('tool_name', ''))}`: `{code(params.get('description', ''))}`\n"
-            f"```\n{code(params.get('input_preview', ''))}\n```\n"
+    description = _summary(params.get('description', ''))
+    preview = _middle_cut(params.get('input_preview', ''), PROMPT_PREVIEW_CHARS)
+    return (f"🔐 Claude wants to use `{code(params.get('tool_name', ''))}`: `{code(description)}`\n"
+            f"```\n{code(preview)}\n```\n"
             f"Reply `yes {rid}` to allow or `no {rid}` to deny.")
 
 

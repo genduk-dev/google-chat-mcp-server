@@ -240,6 +240,16 @@ class PermissionRelayTest(unittest.TestCase):
         self.assertIn('```\n{"command": "ls"}\n```', text)
         self.assertTrue(text.endswith('Reply `yes abcde` to allow or `no abcde` to deny.'))
 
+    def test_long_mcp_description_and_preview_fit_one_chat_message(self):
+        doc = 'Send a message to a Google Chat space, optionally with file attachments. ' + 'Formatting ' * 200
+        preview = '{"command": "' + 'x' * 5000 + ' && rm -rf build"}'
+        text = channel.permission_prompt({'request_id': 'abcde', 'tool_name': 'mcp__g__send_message',
+                                          'description': doc, 'input_preview': preview})
+        self.assertIn('`Send a message to a Google Chat space, optionally with file attachments.`', text)
+        self.assertIn('rm -rf build', text)   # the end of the command survives
+        self.assertIn('chars cut', text)
+        self.assertLess(len(text), 4096)
+
     def test_request_without_a_chat_thread_is_not_relayed(self):
         ch = self.channel()
         with mock.patch.object(channel, 'send_space_message') as send:
