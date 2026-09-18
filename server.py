@@ -293,19 +293,33 @@ async def update_message(message_name: str, text: str = None, file_paths: list =
     return _json(await _update_message(message_name, text, file_paths, filenames, remove_quote_reply))
 
 @mcp.tool()
-async def create_reaction(message_name: str, emoji_unicode: str) -> str:
+async def create_reaction(message_name: str, emoji: str) -> str:
     """Add an emoji reaction to a message in a Google Chat space.
 
     Args:
         message_name: The resource name of the message to react to
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
-        emoji_unicode: The Unicode emoji string to react with (e.g. '👍', '❤️', '😂')
+        emoji: A Unicode emoji ('👍', '❤️') or an organization custom emoji as ':name:'
+               (see list_custom_emojis)
 
     Returns:
         The created reaction object
     """
     from google_chat import create_reaction as _create_reaction
-    return _json(await _create_reaction(message_name, emoji_unicode))
+    return _json(await _create_reaction(message_name, emoji))
+
+@mcp.tool()
+async def list_custom_emojis(query: str = None) -> str:
+    """List the organization's custom emoji, as the ':name:' to pass to create_reaction.
+
+    Args:
+        query: Only names containing this text (case-insensitive)
+
+    Returns:
+        {"total", "emojis": [":name:", ...]}
+    """
+    from google_chat import list_custom_emojis as _list
+    return _json(await _list(query))
 
 @mcp.tool()
 async def list_reactions(message_name: str) -> str:
@@ -355,6 +369,85 @@ async def set_user_name(user_id: str, name: str) -> str:
     """
     from google_chat import set_user_name as _set
     return _json(_set(user_id, name))
+
+@mcp.tool()
+async def create_space(space_type: str, members: List[str] = None, name: str = None,
+                       description: str = None) -> str:
+    """Create a named space, a group chat, or a DM, with its members, in one call.
+
+    This invites real people, so confirm with the user first. Before creating a group
+    chat or DM, check find_group_chats / find_direct_message: one may already exist.
+
+    Args:
+        space_type: SPACE (named, needs name), GROUP_CHAT (unnamed, two or more others),
+            or DIRECT_MESSAGE (exactly one other person)
+        members: The other people as 'users/ID' or 'users/EMAIL'; you are added
+            automatically, so leave yourself out
+        name: Display name, SPACE only
+        description: Short description, SPACE only
+
+    Returns:
+        {"space", "name"?, "type", "uri"}
+    """
+    from google_chat import create_space as _create
+    return _json(await _create(space_type, members, name, description))
+
+@mcp.tool()
+async def get_my_status() -> str:
+    """Your own Google Chat availability and custom status. Google does not expose
+    anyone else's, so this cannot tell whether another person is online.
+
+    Returns:
+        {"state": active|idle|away|do_not_disturb, "dnd_until"?, "custom_status"?: {"emoji", "text", "expires"?}}
+    """
+    from google_chat import get_my_status as _get
+    return _json(await _get())
+
+@mcp.tool()
+async def set_my_status(state: str = None, minutes: int = None, status_text: str = None,
+                        status_emoji: str = None, clear_status: bool = False) -> str:
+    """Set your own availability and/or custom status, as the user asked.
+
+    Args:
+        state: 'active', 'away' or 'dnd' (do not disturb)
+        minutes: How long dnd or the custom status lasts (1-10080); required for both,
+            since Google does not allow either without an end. For "until 8am tomorrow",
+            work out the minutes from the current time.
+        status_text: Custom status text, up to 64 characters; needs status_emoji
+        status_emoji: A Unicode emoji for the custom status (custom emoji are not allowed)
+        clear_status: Remove the custom status
+
+    Returns:
+        Your status afterwards, as get_my_status reports it
+    """
+    from google_chat import set_my_status as _set
+    return _json(await _set(state, minutes, status_text, status_emoji, clear_status))
+
+@mcp.tool()
+async def get_space_notifications(space_name: str) -> str:
+    """Your notification level and mute setting for one space.
+
+    Returns:
+        {"space", "notifications": all|main_conversations|for_you|off, "muted": bool}
+    """
+    from google_chat import get_space_notifications as _get
+    return _json(await _get(space_name))
+
+@mcp.tool()
+async def set_space_notifications(space_name: str, notifications: str = None, muted: bool = None) -> str:
+    """Change your notification level and/or mute a space. Affects only you.
+
+    Args:
+        space_name: The space ('spaces/SPACE_ID')
+        notifications: 'all', 'main_conversations', 'for_you' (mentions and followed
+            threads) or 'off'
+        muted: True to mute, False to unmute
+
+    Returns:
+        {"space", "notifications", "muted"} afterwards
+    """
+    from google_chat import set_space_notifications as _set
+    return _json(await _set(space_name, notifications, muted))
 
 @mcp.tool()
 async def find_group_chats(user_ids: List[str]) -> str:

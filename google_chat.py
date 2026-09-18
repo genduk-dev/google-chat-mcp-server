@@ -38,6 +38,10 @@ SCOPES = [
     'https://www.googleapis.com/auth/directory.readonly',
     'https://www.googleapis.com/auth/chat.users.readstate',
     'https://www.googleapis.com/auth/chat.spaces.pins',
+    'https://www.googleapis.com/auth/chat.customemojis.readonly',
+    'https://www.googleapis.com/auth/chat.spaces.create',
+    'https://www.googleapis.com/auth/chat.users.spacesettings',
+    'https://www.googleapis.com/auth/chat.users.availability',
 ]
 
 # Cache for user display names: {user_id: display_name}
@@ -1355,13 +1359,55 @@ async def update_message(message_name: str, text: str = None, file_paths: Option
         raise Exception(f"Failed to update message: {str(e)}")
 
 
-async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
+# Custom emoji ':name:' -> resource name (customEmojis/...), filled from
+# customEmojis.list on first use. Reactions accept the resource name; the uid
+# the same list returns is rejected as an invalid custom emoji.
+_custom_emoji_uids: Dict[str, str] = {}
+_CUSTOM_EMOJI = re.compile(r':[^:\s]+:')
+
+
+def _list_custom_emojis(creds: Credentials) -> List[Dict]:
+    service = _get_service('chat', 'v1', creds)
+    emojis, page_token = [], None
+    while True:
+        response = service.customEmojis().list(pageSize=200, **({'pageToken': page_token} if page_token else {})).execute()
+        emojis.extend(response.get('customEmojis', []))
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
+    _custom_emoji_uids.update({e['emojiName']: e['name'] for e in emojis if e.get('emojiName')})
+    return emojis
+
+
+async def list_custom_emojis(query: Optional[str] = None) -> Dict:
+    """The organization's custom emoji, as the ':name:' used to react with them."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    names = sorted(e['emojiName'] for e in _list_custom_emojis(creds) if e.get('emojiName'))
+    if query:
+        names = [n for n in names if query.casefold() in n.casefold()]
+    return {'total': len(names), 'emojis': names}
+
+
+def _reaction_emoji(emoji: str, creds: Credentials) -> Dict:
+    """{'unicode': ...} or {'customEmoji': {'name': 'customEmojis/...'}} for ':name:'."""
+    if not _CUSTOM_EMOJI.fullmatch(emoji):
+        return {'unicode': emoji}
+    if emoji not in _custom_emoji_uids:
+        _list_custom_emojis(creds)  # a new emoji, or the first use in this process
+    if emoji not in _custom_emoji_uids:
+        raise ValueError(f"No custom emoji named {emoji}; see list_custom_emojis")
+    return {'customEmoji': {'name': _custom_emoji_uids[emoji]}}
+
+
+async def create_reaction(message_name: str, emoji: str) -> Dict:
     """Add an emoji reaction to a message.
 
     Args:
         message_name: The resource name of the message to react to
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
-        emoji_unicode: The Unicode emoji string to react with (e.g. '👍', '❤️', '😂')
+        emoji: A Unicode emoji ('👍') or an organization custom emoji as ':name:'
 
     Returns:
         The created reaction object
@@ -1374,7 +1420,7 @@ async def create_reaction(message_name: str, emoji_unicode: str) -> Dict:
         service = _get_service('chat', 'v1', creds)
         result = service.spaces().messages().reactions().create(
             parent=message_name,
-            body={'emoji': {'unicode': emoji_unicode}},
+            body={'emoji': _reaction_emoji(emoji, creds)},
         ).execute()
 
         return result
@@ -1749,6 +1795,132 @@ async def get_member(space_name: str, user: str) -> Dict:
         get_user_display_name(member, creds)
     return {**_member_fields(membership), 'state': membership.get('state'),
             'joined': _short_time(membership.get('createTime'))}
+
+
+def _status(availability: Dict) -> Dict:
+    out = {'state': availability.get('state', 'STATE_UNSPECIFIED').lower()}
+    dnd_until = availability.get('doNotDisturbMetadata', {}).get('expirationTime')
+    if dnd_until:
+        out['dnd_until'] = _short_time(dnd_until)
+    custom = availability.get('customStatus')
+    if custom:
+        out['custom_status'] = {k: v for k, v in {
+            'emoji': custom.get('emoji', {}).get('unicode'), 'text': custom.get('text'),
+            'expires': _short_time(custom.get('expireTime'))}.items() if v}
+    return out
+
+
+async def get_my_status() -> Dict:
+    """Your own Chat availability; Google exposes nobody else's."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    return _status(_chat_request(creds, 'GET', 'users/me/availability'))
+
+
+async def set_my_status(state: Optional[str] = None, minutes: Optional[int] = None,
+                        status_text: Optional[str] = None, status_emoji: Optional[str] = None,
+                        clear_status: bool = False) -> Dict:
+    """Set your availability (active, away, dnd) and/or your custom status."""
+    if state not in (None, 'active', 'away', 'dnd'):
+        raise ValueError("state must be 'active', 'away' or 'dnd'")
+    if minutes is not None and not 1 <= minutes <= 7 * 24 * 60:
+        raise ValueError("minutes must be between 1 and 10080 (a week)")
+    if status_text is not None and not 1 <= len(status_text) <= 64:
+        raise ValueError("status_text must be 1 to 64 characters")
+    if status_text is not None and not status_emoji:
+        raise ValueError("a custom status needs status_emoji, a Unicode emoji")
+    # Google rejects both without an end: "must have an expiration".
+    if (state == 'dnd' or status_text is not None) and not minutes:
+        raise ValueError("dnd and a custom status need minutes: Google requires them to expire")
+    if state is None and status_text is None and not clear_status:
+        raise ValueError("Give state, a custom status, or clear_status")
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    ttl = {'ttl': f'{minutes * 60}s'} if minutes else {}
+    if state == 'dnd':
+        _chat_request(creds, 'POST', 'users/me/availability:markAsDoNotDisturb', json=ttl)
+    elif state == 'away':
+        _chat_request(creds, 'POST', 'users/me/availability:markAsAway', json={})
+    elif state == 'active':
+        _chat_request(creds, 'POST', 'users/me/availability:markAsActive', json={})
+    if status_text is not None or clear_status:
+        body = {} if clear_status else {'customStatus': {'emoji': {'unicode': status_emoji}, 'text': status_text, **ttl}}
+        _chat_request(creds, 'PATCH', 'users/me/availability', params={'updateMask': 'customStatus'}, json=body)
+    return _status(_chat_request(creds, 'GET', 'users/me/availability'))
+
+
+_NOTIFICATIONS = {'all': 'ALL', 'main_conversations': 'MAIN_CONVERSATIONS', 'for_you': 'FOR_YOU', 'off': 'OFF'}
+
+
+def _notification_fields(setting: Dict) -> Dict:
+    return {'notifications': setting.get('notificationSetting', 'NOTIFICATION_SETTING_UNSPECIFIED').lower(),
+            'muted': setting.get('muteSetting') == 'MUTED'}
+
+
+async def get_space_notifications(space_name: str) -> Dict:
+    """Your notification and mute settings for one space."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    setting = _get_service('chat', 'v1', creds).users().spaces().spaceNotificationSetting().get(
+        name=f"users/me/{space_name}/spaceNotificationSetting").execute()
+    return {'space': space_name, **_notification_fields(setting)}
+
+
+async def set_space_notifications(space_name: str, notifications: Optional[str] = None,
+                                  muted: Optional[bool] = None) -> Dict:
+    """Change your notification level and/or mute for one space; only you are affected."""
+    if notifications is not None and notifications not in _NOTIFICATIONS:
+        raise ValueError(f"notifications must be one of {sorted(_NOTIFICATIONS)}")
+    if notifications is None and muted is None:
+        raise ValueError("Give notifications, muted, or both")
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    body = {}
+    if notifications is not None:
+        body['notificationSetting'] = _NOTIFICATIONS[notifications]
+    if muted is not None:
+        body['muteSetting'] = 'MUTED' if muted else 'UNMUTED'
+    mask = ','.join({'notificationSetting': 'notification_setting', 'muteSetting': 'mute_setting'}[k] for k in body)
+    setting = _get_service('chat', 'v1', creds).users().spaces().spaceNotificationSetting().patch(
+        name=f"users/me/{space_name}/spaceNotificationSetting", updateMask=mask, body=body).execute()
+    return {'space': space_name, **_notification_fields(setting)}
+
+
+async def create_space(space_type: str, members: Optional[List[str]] = None, name: Optional[str] = None,
+                       description: Optional[str] = None) -> Dict:
+    """Create a space, group chat or DM with its members in one call (spaces.setup)."""
+    members = members or []
+    if space_type not in ('SPACE', 'GROUP_CHAT', 'DIRECT_MESSAGE'):
+        raise ValueError("space_type must be SPACE, GROUP_CHAT or DIRECT_MESSAGE")
+    if space_type == 'SPACE' and not name:
+        raise ValueError("A SPACE needs a name")
+    if space_type != 'SPACE' and (name or description):
+        raise ValueError("Only a SPACE has a name and description")
+    if space_type == 'DIRECT_MESSAGE' and len(members) != 1:
+        raise ValueError("A DIRECT_MESSAGE takes exactly one other member")
+    if space_type == 'GROUP_CHAT' and len(members) < 2:
+        raise ValueError("A GROUP_CHAT takes at least two other members; for one use DIRECT_MESSAGE")
+    for m in members:
+        if not m.startswith('users/'):
+            raise ValueError(f"Members are 'users/ID' or 'users/EMAIL', got {m!r}")
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    space = {'spaceType': space_type}
+    if name:
+        space['displayName'] = name
+    if description:
+        space['spaceDetails'] = {'description': description}
+    body = {'space': space, 'memberships': [{'member': {'name': m, 'type': 'HUMAN'}} for m in members],
+            # Makes a retried request return the space the first attempt created.
+            'requestId': str(uuid.uuid4())}
+    created = _get_service('chat', 'v1', creds).spaces().setup(body=body).execute()
+    return {k: v for k, v in {'space': created['name'], 'name': created.get('displayName'),
+                              'type': created.get('spaceType'), 'uri': created.get('spaceUri')}.items() if v}
 
 
 async def delete_reaction(reaction_name: str) -> Dict:
