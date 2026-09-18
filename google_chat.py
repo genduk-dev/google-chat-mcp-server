@@ -27,6 +27,8 @@ SCOPES = [
     'https://www.googleapis.com/auth/chat.memberships.readonly',
     'https://www.googleapis.com/auth/userinfo.profile',
     'https://www.googleapis.com/auth/directory.readonly',
+    'https://www.googleapis.com/auth/chat.users.readstate',
+    'https://www.googleapis.com/auth/chat.spaces.pins',
 ]
 
 # Cache for user display names: {user_id: display_name}
