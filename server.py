@@ -645,13 +645,15 @@ def complete_authentication(callback_url: str) -> str:
     return _json(_complete_authentication(callback_url))
 
 def run_channel(args) -> None:
-    """Serve the normal tools plus the channel capability, watch tools, and poller."""
+    """Serve the channel capability, watch tools and poller, plus the normal tools unless
+    --channel-only says another server (for example one behind a gateway) provides them."""
     from pathlib import Path
     import anyio
     from mcp.server.stdio import stdio_server
     from mcp.shared.message import SessionMessage
     from channel import Channel, ChannelStore, INSTRUCTIONS, PERMISSION_REQUEST_METHOD
 
+    app = FastMCP("Google Chat") if args.channel_only else mcp
     state_path = Path(args.channel_state_path or Path(args.token_path).parent / 'channel_state.json')
     channel = Channel(ChannelStore(state_path), args.poll_seconds)
 
@@ -693,9 +695,9 @@ def run_channel(args) -> None:
 
     # On the event loop, like the poller that reads the same state.
     for fn in (watch_space, unwatch_space, list_watched_spaces):
-        mcp.tool(fn, output_schema=None, run_in_thread=False)
+        app.tool(fn, output_schema=None, run_in_thread=False)
 
-    server = mcp._mcp_server
+    server = app._mcp_server
     server.instructions = INSTRUCTIONS
     # Permission relay is safe to offer: only allowlisted senders can answer.
     options = server.create_initialization_options(
@@ -744,10 +746,13 @@ if __name__ == "__main__":
     parser.add_argument('--token-path', default='token.json', help='Path to store OAuth token (default: token.json)')
     parser.add_argument('--raw-messages', action='store_true', help='Return raw API messages without filtering fields (filtered by default)')
     parser.add_argument('--channel', action='store_true', help='Run as a Claude Code channel: push new messages from watched spaces into the session')
+    parser.add_argument('--channel-only', action='store_true', help='With --channel, serve only the watch tools; the Chat tools come from another server')
     parser.add_argument('--channel-state-path', help='Where watched spaces are stored (default: channel_state.json next to the token)')
     parser.add_argument('--poll-seconds', type=float, default=5.0, help='Channel poll interval in seconds (default: 5)')
 
     args = parser.parse_args()
+    if args.channel_only and not args.channel:
+        parser.error('--channel-only requires --channel')
 
     # Set the token path for OAuth storage
     set_token_path(args.token_path)

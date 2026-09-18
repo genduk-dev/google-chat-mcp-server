@@ -125,6 +125,33 @@ Then ask it to watch a space (`watch_space`, optionally `mention_only`).
 
 The plain config never polls; any number of normal sessions can use it.
 
+### Behind an HTTP gateway
+
+The plain server can sit behind an MCP gateway that serves it over HTTP, so
+sessions on other machines use it without a local install. The channel
+cannot: Claude Code delivers channel messages only from a server it runs over
+stdio. Run the channel on the gateway's machine with `--channel-only`, which
+serves just the watch tools and takes the Chat tools from the gateway:
+
+```json
+{
+  "mcpServers": {
+    "GoogleChat": {"type": "http", "url": "http://gateway-host:8000/mcp/GoogleChat"},
+    "gchat-channel": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/google-chat-mcp-server", "server.py",
+               "--token-path", "/path/to/credentials-dir/token.json",
+               "--channel", "--channel-only"],
+      "env": {"BOT_NAME": "Genduk"}
+    }
+  }
+}
+```
+
+Give the server behind the gateway the same `BOT_NAME` and token path. The
+channel tells its own replies apart by the name they are tagged with, so a
+different name makes it deliver them back to the session.
+
 ## Learn more
 
 | If you want to | Read |
