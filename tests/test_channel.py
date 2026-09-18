@@ -155,6 +155,41 @@ class PollTest(unittest.TestCase):
         ])
         self.assertEqual([n['content'] for n in ch.poll_once()], ['@Genduk summarize'])
 
+    def threaded(self, name, thread, text, time, **kw):
+        msg = message(name, text=text, create_time=time, **kw)
+        msg['thread'] = {'name': f'{SPACE}/threads/{thread}'}
+        return msg
+
+    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
+    def test_mention_only_thread_followups_need_no_mention(self):
+        self.store.save({SPACE: {'allowed_senders': [OWNER], 'mention_only': True}})
+        ch = Channel(self.store, 5)
+        ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
+        self.list_returns([
+            self.threaded('m1', 'A', '@genduk check the deploy', '2026-09-18T06:00:01Z'),
+            self.threaded('m2', 'A', 'the staging one', '2026-09-18T06:10:00Z'),          # follow-up
+            self.threaded('m3', 'B', 'unrelated chatter', '2026-09-18T06:10:01Z'),        # other thread
+            self.threaded('m4', 'A', 'still there?', '2026-09-18T06:41:00Z'),             # 31 min later
+            self.threaded('m5', 'C', 'reply from Claude', '2026-09-18T06:42:00Z',
+                          client_id=f'{APP_MESSAGE_PREFIX}x'),
+            self.threaded('m6', 'C', 'thanks, one more', '2026-09-18T06:43:00Z'),         # after our reply
+        ])
+        self.assertEqual([n['content'] for n in ch.poll_once()],
+                         ['@genduk check the deploy', 'the staging one', 'thanks, one more'])
+
+    def test_active_threads_survive_a_takeover(self):
+        ch = Channel(self.store, 5)
+        ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
+        now = channel.datetime.datetime.now(channel.datetime.timezone.utc)
+        recent = now.isoformat().replace('+00:00', 'Z')
+        ch.active_threads = {f'{SPACE}/threads/A': recent, f'{SPACE}/threads/OLD': '2026-01-01T00:00:00Z'}
+        ch._save_cursors()
+        saved = json.loads(ch.cursor_path.read_text())
+        self.assertEqual(list(saved['threads']), [f'{SPACE}/threads/A'])   # expired one pruned
+        other = Channel(self.store, 5)
+        other._resume_cursors()
+        self.assertEqual(other.active_threads, {f'{SPACE}/threads/A': recent})
+
     def test_failed_space_keeps_its_cursor(self):
         ch = Channel(self.store, 5)
         ch.cursors[SPACE] = '2026-09-18T06:00:00Z'

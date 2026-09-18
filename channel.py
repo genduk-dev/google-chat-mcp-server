@@ -27,7 +27,8 @@ import mcp.types as types
 from mcp.shared.message import SessionMessage
 
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text,
-                         self_user_id, send_space_message, update_message, write_private, _get_service)
+                         self_user_id, send_space_message, update_message, write_private, _get_service,
+                         _parse_time)
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,9 @@ INSTRUCTIONS = (
     'conversation you have not seen, read its thread first with get_messages(space_name=chat_id, '
     'thread_name=thread_name). When a request came from Google Chat and you need the '
     'operator to choose or clarify something, ask in that thread with send_message and wait for '
-    'the reply to arrive as a channel message (in a mention_only space, ask them to include '
-    f'@{BOT_NAME} in the reply); do not use AskUserQuestion, which only the terminal can answer. '
+    'the reply to arrive as a channel message; do not use AskUserQuestion, which only the '
+    'terminal can answer. In a mention_only space, replies in a thread you are part of arrive '
+    f'without @{BOT_NAME} for 30 minutes after its last message; elsewhere they need the mention. '
     'Tool permission prompts are relayed to that thread automatically.'
 )
 
@@ -63,6 +65,9 @@ RESUME_WINDOW = datetime.timedelta(minutes=10)
 # The poller re-saves unchanged cursors this often, so a quiet space still
 # looks alive to a takeover.
 CURSOR_HEARTBEAT = datetime.timedelta(minutes=1)
+# In a mention_only space, a thread stays in the conversation this long after a
+# message in it was delivered or answered, so replies there need no @mention.
+FOLLOWUP_WINDOW = datetime.timedelta(minutes=30)
 # A lease not renewed for this long belongs to a hung poller and may be taken.
 # Tool calls block the event loop too, so it must outlast the slowest of them.
 LEASE_TTL = datetime.timedelta(seconds=60)
@@ -188,7 +193,9 @@ class Channel:
         # Per-space cursor: only messages created after it are delivered, so
         # watching a space never replays history.
         self.cursors: Dict[str, str] = {}
-        self._saved_cursors: Dict[str, str] = {}
+        self._saved_cursors: Optional[Tuple[Dict, Dict]] = None  # last written (cursors, threads)
+        # thread name -> createTime of the last message delivered or sent by us there
+        self.active_threads: Dict[str, str] = {}
         self._saved_at: Optional[datetime.datetime] = None
         self._token = uuid.uuid4().hex
         self.active = False
@@ -254,7 +261,7 @@ class Channel:
     def _resume_cursors(self) -> None:
         # Cursors a standby set in watch() may be hours old; the previous poller's
         # saved ones are authoritative, and a space without one starts from now.
-        self.cursors = {}
+        self.cursors, self.active_threads = {}, {}
         if not self.cursor_path.exists():
             return
         saved = json.loads(self.cursor_path.read_text())
@@ -262,14 +269,19 @@ class Channel:
         cutoff = datetime.datetime.now(datetime.timezone.utc) - RESUME_WINDOW
         if saved_at and datetime.datetime.fromisoformat(saved_at) >= cutoff:
             self.cursors.update(saved.get('cursors', {}))
+            self.active_threads.update(saved.get('threads', {}))
 
     def _save_cursors(self) -> None:
         cursors = {s: ts for s, ts in self.cursors.items() if s in self.store.load()}
         now = datetime.datetime.now(datetime.timezone.utc)
-        if cursors == self._saved_cursors and self._saved_at and now - self._saved_at < CURSOR_HEARTBEAT:
+        self.active_threads = {t: ts for t, ts in self.active_threads.items()
+                               if now - _parse_time(ts) < FOLLOWUP_WINDOW}
+        state = (cursors, dict(self.active_threads))
+        if state == self._saved_cursors and self._saved_at and now - self._saved_at < CURSOR_HEARTBEAT:
             return
-        write_private(self.cursor_path, json.dumps({'saved_at': now.isoformat(), 'cursors': cursors}))
-        self._saved_cursors, self._saved_at = cursors, now
+        write_private(self.cursor_path, json.dumps(
+            {'saved_at': now.isoformat(), 'cursors': cursors, 'threads': self.active_threads}))
+        self._saved_cursors, self._saved_at = state, now
 
     @contextlib.contextmanager
     def _permissions(self):
@@ -375,6 +387,10 @@ class Channel:
                 'poller': self.poller_status(),
                 'spaces': [{'space_name': s, **config} for s, config in self.store.load().items()]}
 
+    def _in_followup(self, thread: str, created: str) -> bool:
+        last = self.active_threads.get(thread)
+        return bool(last) and _parse_time(created) - _parse_time(last) < FOLLOWUP_WINDOW
+
     def poll_once(self) -> List[Dict]:
         """Fetch new messages from every watched space and return the notifications to send."""
         spaces = self.store.load()
@@ -404,8 +420,15 @@ class Channel:
                     # never to Claude as chat.
                     self._answered.append((space_name, *verdict, get_user_display_name(msg.get('sender', {}), creds)))
                     continue
-                if not should_deliver(msg, config['allowed_senders'], config['mention_only']):
+                thread = msg.get('thread', {}).get('name', '')
+                if msg.get('clientAssignedMessageId', '').startswith(APP_MESSAGE_PREFIX):
+                    # Claude answered here, so the thread is part of the conversation.
+                    self.active_threads[thread] = msg['createTime']
                     continue
+                mention_only = config['mention_only'] and not self._in_followup(thread, msg['createTime'])
+                if not should_deliver(msg, config['allowed_senders'], mention_only):
+                    continue
+                self.active_threads[thread] = msg['createTime']
                 sender_name = get_user_display_name(msg.get('sender', {}), creds)
                 out.append(to_notification(msg, space_name, sender_name))
         return out
