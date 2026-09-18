@@ -32,7 +32,7 @@ async def get_spaces(query: str = None, space_type: str = None, limit: int = 100
         limit: Max spaces to return (1-1000)
 
     Returns:
-        {"total": spaces matching, "spaces": [{"space", "name"?, "type", "last_active"?}]}.
+        {"total": spaces matching, "spaces": [{"space", "name"?, "type", "last_active"?, "link"}]}.
         Use get_space for one space's details.
     """
     return _json(await list_chat_spaces(query, space_type, limit))
@@ -53,15 +53,18 @@ async def get_messages(space_name: str,
     - limit returns only the most recent N matching messages (1-1000).
 
     Returns one object, grouped by thread to save tokens:
-        {"space": "spaces/S",
-         "threads": [{"thread": "spaces/S/threads/T",
+        {"space": "spaces/S", "link": "https://chat.google.com/room/S",
+         "threads": [{"thread": "spaces/S/threads/T", "link": ".../room/S/T",
                       "messages": [{"id": "T.M", "sender": "...", "time": "...", "text": "..."}]}],
          "more": true,        # with limit: older matching messages exist beyond it
          "truncated": true}   # only when more than 1000 messages matched
     Threads are ordered by their first returned message, messages oldest first.
+    "link" opens the space or thread in Google Chat (DMs use /dm/ instead of /room/;
+    take it from here rather than building it). A single message opens at its thread's
+    link plus "/" and the part of its id after the dot: id "T.M" -> "{thread link}/M".
     A sender shown as "users/ID" has no name Google can give (a deleted or hidden account).
     When such a message matters to the task, show the user its text, space and link
-    (https://chat.google.com/room/SPACE_ID/THREAD_ID/MESSAGE_ID) and ask who wrote it; if
+    (see "link" above) and ask who wrote it; if
     they know, save it with set_user_name so later reads show the name.
     A message's full name is "{space}/messages/{id}"; use it for get_message, reactions,
     quote replies and attachments. Pass a group's "thread" as send_message's thread_name
@@ -120,7 +123,7 @@ async def list_unread_spaces(days: int = 1) -> str:
     at "100+". Read one with get_unread_messages, then mark it with mark_space_read.
 
     Returns:
-        {"since", "checked", "spaces": [{"space", "name", "type", "unread", "last_read", "latest"}]},
+        {"since", "checked", "spaces": [{"space", "name", "type", "link", "unread", "last_read", "latest"}]},
         most recently active first.
     """
     from google_chat import list_unread_spaces as _list
@@ -220,6 +223,10 @@ async def send_message(space_name: str, text: str, thread_key: str = None, threa
     - Links: [label](url) or <url|label> show as a hyperlinked label. A bare URL shows
       in full, and a bare Google Drive URL also gets a large preview card; use it when
       the file itself should stand out. Inline file chips cannot be created via the API.
+    - To point at a space, DM, thread or message, link it: [Ops space](link). Take "link"
+      from get_spaces, get_space, get_messages or list_unread_spaces; a message is its
+      thread's link plus "/" and the part of its id after the dot. Chat has no #space
+      mention, so a link is the only way.
     - *bold* or **bold**, _italic_, ~strike~ or ~~strike~~, `code`, ```code block```.
       Markdown inside code is sent as is. Headings and tables are not supported.
     - Mentions: <users/USER_ID> (see get_members), or <users/all> for everyone.
@@ -387,7 +394,7 @@ async def create_space(space_type: str, members: List[str] = None, name: str = N
         description: Short description, SPACE only
 
     Returns:
-        {"space", "name"?, "type", "uri"}
+        {"space", "name"?, "type", "link"}
     """
     from google_chat import create_space as _create
     return _json(await _create(space_type, members, name, description))
@@ -459,7 +466,7 @@ async def find_group_chats(user_ids: List[str]) -> str:
         user_ids: 1-49 other people, as 'users/USER_ID' or 'users/EMAIL'. Leave yourself out.
 
     Returns:
-        [{"space", "name" (only when the chat was named), "last_active", "uri"}];
+        [{"space", "name" (only when the chat was named), "last_active", "link"}];
         empty when no such group chat exists
     """
     from google_chat import find_group_chats as _find
@@ -474,7 +481,7 @@ async def get_space(space_name: str) -> str:
         count of people who joined directly; it can leave out external people and removed
         accounts, so use get_members for who is in it), "member_groups"?, "external_allowed"?, "discoverable"?, "history_off"?
         (messages deleted after 24h), "threading"? (when not threaded), "created",
-        "last_active"?, "uri", "restricted"?: {setting: [roles allowed]}}.
+        "last_active"?, "link", "restricted"?: {setting: [roles allowed]}}.
         Optional keys appear only when they differ from the usual: a private, threaded
         space with history on, where every role may post, reply, manage members, use
         @all and so on.

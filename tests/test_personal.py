@@ -95,7 +95,7 @@ class CreateSpaceTest(Base):
         self.assertEqual(body['memberships'], [{'member': {'name': 'users/a@x.com', 'type': 'HUMAN'}}])
         self.assertTrue(body['requestId'])
         self.assertEqual(result, {'space': 'spaces/NEW', 'name': 'Ops', 'type': 'SPACE',
-                                  'uri': 'https://chat.google.com/room/NEW'})
+                                  'link': 'https://chat.google.com/room/NEW'})
 
 
 if __name__ == '__main__':

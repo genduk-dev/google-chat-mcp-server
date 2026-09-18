@@ -19,6 +19,11 @@ class ListSpaceMessagesTest(unittest.TestCase):
         self.pages = []
         self.chat.spaces().messages().list.side_effect = lambda **kw: mock.Mock(
             execute=mock.Mock(return_value=self.pages.pop(0)))
+        self.chat.spaces().get.return_value.execute.return_value = {
+            'name': SPACE, 'spaceUri': 'https://chat.google.com/room/S?cls=11'}
+        links = mock.patch.dict(google_chat._space_links, clear=True)
+        links.start()
+        self.addCleanup(links.stop)
         for target, kw in [('get_credentials', {'return_value': object()}),
                            ('_get_service', {'return_value': self.chat}),
                            ('get_user_display_name', {'return_value': 'Husni'})]:
@@ -78,6 +83,18 @@ class ListSpaceMessagesTest(unittest.TestCase):
     def test_hitting_the_cap_without_a_limit_is_marked_truncated(self):
         self.pages = [{'messages': [msg(f'm{i}') for i in range(1000)], 'nextPageToken': 'more'}]
         self.assertTrue(self.run_list(start_date=datetime.datetime(2026, 9, 18, tzinfo=datetime.timezone.utc))['truncated'])
+
+    def test_links_to_the_space_and_each_thread_from_one_lookup(self):
+        self.chat.spaces().get.return_value.execute.return_value = {
+            'name': SPACE, 'spaceUri': 'https://chat.google.com/dm/S?cls=11'}
+        self.pages = [{'messages': [msg('T1.a'), msg('T2.b', thread='T2')]}]
+        result = self.run_list(limit=5)
+        self.assertEqual(result['link'], 'https://chat.google.com/dm/S')
+        self.assertEqual(sorted(t['link'] for t in result['threads']),
+                         ['https://chat.google.com/dm/S/T1', 'https://chat.google.com/dm/S/T2'])
+        self.pages = [{'messages': [msg('T1.c')]}]
+        self.run_list(limit=5)
+        self.assertEqual(self.chat.spaces().get.return_value.execute.call_count, 1)   # cached
 
     def test_after_filter_and_more_flag(self):
         self.pages = [{'messages': [msg('m2'), msg('m1')], 'nextPageToken': 'older'}]
@@ -388,7 +405,7 @@ class PinsAndLookupsTest(unittest.TestCase):
             space = asyncio.run(google_chat.get_space(SPACE))
         self.assertEqual(space, {'space': SPACE, 'name': 'Ops', 'type': 'SPACE', 'description': 'On-call',
                                  'members': 4, 'history_off': True, 'created': '2023-02-17T02:44:34Z',
-                                 'uri': 'https://chat.google.com/room/S', 'restricted': {'manageApps': ['managers']}})
+                                 'link': 'https://chat.google.com/room/S', 'restricted': {'manageApps': ['managers']}})
 
     def test_get_member_reports_a_non_member_without_invented_fields(self):
         chat = mock.MagicMock()
@@ -458,8 +475,10 @@ class GetSpacesTest(unittest.TestCase):
                 mock.patch.object(google_chat, '_get_service', return_value=chat):
             result = asyncio.run(google_chat.list_chat_spaces(query='OPS', limit=2))
             self.assertEqual(result, {'total': 3, 'spaces': [
-                {'space': 'spaces/new', 'name': 'ops new', 'type': 'SPACE', 'last_active': '2026-09-18T00:00:00Z'},
-                {'space': 'spaces/old', 'name': 'Ops Old', 'type': 'SPACE', 'last_active': '2026-01-01T00:00:00Z'}]})
+                {'space': 'spaces/new', 'name': 'ops new', 'type': 'SPACE', 'last_active': '2026-09-18T00:00:00Z',
+                 'link': 'https://chat.google.com/room/new'},
+                {'space': 'spaces/old', 'name': 'Ops Old', 'type': 'SPACE', 'last_active': '2026-01-01T00:00:00Z',
+                 'link': 'u'}]})
             asyncio.run(google_chat.list_chat_spaces(space_type='GROUP_CHAT'))
             self.assertEqual(chat.spaces().list.call_args.kwargs['filter'], 'spaceType = "GROUP_CHAT"')
             with self.assertRaises(ValueError):

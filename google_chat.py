@@ -637,6 +637,24 @@ async def list_space_members(space_name: str) -> List[Dict]:
 # MCP functions
 SPACE_TYPES = {'SPACE', 'GROUP_CHAT', 'DIRECT_MESSAGE'}
 
+# Space -> its link in the Chat web app, from spaceUri. Only Google knows
+# whether a space opens under /room/ or /dm/, and messages do not say.
+_space_links: Dict[str, str] = {}
+
+
+def _link(space: Dict) -> str:
+    """https://chat.google.com/room/ID or /dm/ID, without the ?cls= client hint."""
+    uri = space.get('spaceUri') or f"https://chat.google.com/room/{space['name'].removeprefix('spaces/')}"
+    link = uri.split('?')[0]
+    _space_links[space['name']] = link
+    return link
+
+
+def space_link(space_name: str, creds: Credentials) -> str:
+    if space_name not in _space_links:
+        _space_links[space_name] = _link(_get_service('chat', 'v1', creds).spaces().get(name=space_name).execute())
+    return _space_links[space_name]
+
 
 async def list_chat_spaces(query: Optional[str] = None, space_type: Optional[str] = None,
                            limit: int = 100) -> Dict:
@@ -679,6 +697,7 @@ async def list_chat_spaces(query: Optional[str] = None, space_type: Optional[str
         entry['type'] = sp.get('spaceType')
         if _last_active(sp):
             entry['last_active'] = _short_time(sp['lastActiveTime'])
+        entry['link'] = _link(sp)
         out.append(entry)
     return {'total': len(spaces), 'spaces': out}
 
@@ -807,8 +826,10 @@ async def list_space_messages(space_name: str,
             key = msg.get('thread', {}).get('name', '')
             threads.setdefault(key, []).append(_compact_message(msg, creds, space_name))
 
-        result = {'space': space_name,
-                  'threads': [{'thread': t, 'messages': msgs} for t, msgs in threads.items()]}
+        link = space_link(space_name, creds)
+        result = {'space': space_name, 'link': link,
+                  'threads': [{'thread': t, 'link': f"{link}/{t.rsplit('/', 1)[-1]}", 'messages': msgs}
+                              for t, msgs in threads.items()]}
         if more:
             result['more'] = True
         if truncated:
@@ -905,7 +926,7 @@ def _space_unread(creds: Credentials, space: Dict, self_id: str) -> Optional[Dic
                 senders.append(sender)
         name = ', '.join(senders[:3]) + (' and others' if len(senders) > 3 else '')
     count = len(others)
-    return {'space': space['name'], 'name': name, 'type': space.get('spaceType'),
+    return {'space': space['name'], 'name': name, 'type': space.get('spaceType'), 'link': _link(space),
             'unread': f'{min(count, 100)}+' if count > 100 or page.get('nextPageToken') else count,
             'last_read': _short_time(last_read),
             'latest': _short_time(space['lastActiveTime']) if active else _short_time(others[-1].get('createTime'))}
@@ -1728,7 +1749,7 @@ async def find_group_chats(user_ids: List[str]) -> List[Dict]:
             break
     return [{k: v for k, v in {'space': s['name'], 'name': s.get('displayName'),
                                'last_active': _short_time(s.get('lastActiveTime')),
-                               'uri': s.get('spaceUri')}.items() if v}
+                               'link': _link(s)}.items() if v}
             for s in spaces]
 
 
@@ -1766,7 +1787,7 @@ async def get_space(space_name: str) -> Dict:
     out['created'] = _short_time(space.get('createTime'))
     if _last_active(space):
         out['last_active'] = _short_time(space['lastActiveTime'])
-    out['uri'] = space.get('spaceUri')
+    out['link'] = _link(space)
     restricted = {}
     for setting, allowed in space.get('permissionSettings', {}).items():
         roles = [label for key, label in _PERMISSION_ROLES.items() if allowed.get(key)]
@@ -1920,7 +1941,7 @@ async def create_space(space_type: str, members: Optional[List[str]] = None, nam
             'requestId': str(uuid.uuid4())}
     created = _get_service('chat', 'v1', creds).spaces().setup(body=body).execute()
     return {k: v for k, v in {'space': created['name'], 'name': created.get('displayName'),
-                              'type': created.get('spaceType'), 'uri': created.get('spaceUri')}.items() if v}
+                              'type': created.get('spaceType'), 'link': _link(created)}.items() if v}
 
 
 async def delete_reaction(reaction_name: str) -> Dict:
