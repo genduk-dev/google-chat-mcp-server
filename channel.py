@@ -11,6 +11,7 @@ hung. A holder that wakes up after a takeover sees the lease is no longer its
 own and stands down. The holder persists its cursors, so a takeover resumes
 where the previous poller stopped instead of skipping the gap.
 """
+import contextlib
 import datetime
 import fcntl
 import json
@@ -19,18 +20,25 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import anyio
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text,
-                         self_user_id, write_private, _get_service)
+                         self_user_id, send_space_message, update_message, write_private, _get_service)
 
 logger = logging.getLogger(__name__)
 
 CHANNEL_METHOD = 'notifications/claude/channel'
+PERMISSION_REQUEST_METHOD = 'notifications/claude/channel/permission_request'
+PERMISSION_METHOD = 'notifications/claude/channel/permission'
+# "yes abcde" / "no abcde", optionally after an @mention. Claude Code's request IDs
+# are five lowercase letters without 'l'; /i tolerates phone autocapitalization.
+PERMISSION_REPLY_RE = re.compile(r'^\s*(?:@\S+\s+)?(y|yes|n|no)\s+([a-km-z]{5})\s*$', re.IGNORECASE)
+# A pending request nobody answered remotely (the terminal did, or nobody) is dropped after this.
+PERMISSION_TTL = datetime.timedelta(hours=1)
 
 INSTRUCTIONS = (
     'Google Chat messages arrive as <channel source="..." chat_id="spaces/..." thread_name="..." '
@@ -41,7 +49,11 @@ INSTRUCTIONS = (
     'watch_space, unwatch_space and list_watched_spaces. A space watched with mention_only '
     f'delivers only messages that mention @{BOT_NAME}. If a message depends on earlier '
     'conversation you have not seen, read its thread first with get_messages(space_name=chat_id, '
-    'thread_name=thread_name).'
+    'thread_name=thread_name). When a request came from Google Chat and you need the '
+    'operator to choose or clarify something, ask in that thread with send_message and wait for '
+    'the reply to arrive as a channel message (in a mention_only space, ask them to include '
+    f'@{BOT_NAME} in the reply); do not use AskUserQuestion, which only the terminal can answer. '
+    'Tool permission prompts are relayed to that thread automatically.'
 )
 
 # A takeover resumes from saved cursors only if the previous poller saved them
@@ -89,6 +101,33 @@ def should_deliver(msg: Dict, allowed_senders: List[str], mention_only: bool = F
     return not mention_only or mentions_bot(msg.get('text') or '')
 
 
+def parse_verdict(msg: Dict, allowed_senders: List[str]) -> Optional[Tuple[str, str]]:
+    """(request_id, 'allow' or 'deny') when an allowed sender answers a permission prompt.
+
+    Checked before mention_only: an answer needs no @mention, but it does need a
+    sender on the allowlist, since it approves tool use in the session.
+    """
+    if msg.get('clientAssignedMessageId', '').startswith(APP_MESSAGE_PREFIX):
+        return None
+    if msg.get('sender', {}).get('name') not in allowed_senders:
+        return None
+    m = PERMISSION_REPLY_RE.match(msg.get('text') or '')
+    if not m:
+        return None
+    return m.group(2).lower(), 'allow' if m.group(1).lower().startswith('y') else 'deny'
+
+
+def permission_prompt(params: Dict) -> str:
+    """The Chat message for a permission request. Both fields are untrusted, so they
+    go in code, where Chat shows mention and link markup literally."""
+    def code(text: str) -> str:
+        return text.replace('`', "'")
+    rid = params['request_id']
+    return (f"🔐 Claude wants to use `{code(params.get('tool_name', ''))}`: `{code(params.get('description', ''))}`\n"
+            f"```\n{code(params.get('input_preview', ''))}\n```\n"
+            f"Reply `yes {rid}` to allow or `no {rid}` to deny.")
+
+
 def to_notification(msg: Dict, space_name: str, sender_name: str) -> Dict:
     """Build notification params. Meta keys must be identifiers or Claude Code drops them."""
     meta = {
@@ -116,6 +155,12 @@ class Channel:
         # one for their whole life, and waiting on it would never return.
         self.lease_lock_path = store.path.with_name('channel.lease.lock')
         self.cursor_path = store.path.with_name('channel_cursors.json')
+        # Pending permission prompts and their verdicts. The session that asked may
+        # not be the poller that reads the answer, so they meet in this file.
+        self.permissions_path = store.path.with_name('channel_permissions.json')
+        # (space, thread) of the last message delivered to this session: where its
+        # permission prompts go.
+        self.last_thread: Optional[Tuple[str, str]] = None
         # Per-space cursor: only messages created after it are delivered, so
         # watching a space never replays history.
         self.cursors: Dict[str, str] = {}
@@ -202,6 +247,58 @@ class Channel:
         write_private(self.cursor_path, json.dumps({'saved_at': now.isoformat(), 'cursors': cursors}))
         self._saved_cursors, self._saved_at = cursors, now
 
+    @contextlib.contextmanager
+    def _permissions(self):
+        """The pending-permission table, read and written under the lease lock."""
+        self.lease_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.lease_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                table = json.loads(self.permissions_path.read_text())
+            except FileNotFoundError:
+                table = {}
+            cutoff = datetime.datetime.now(datetime.timezone.utc) - PERMISSION_TTL
+            table = {rid: e for rid, e in table.items() if datetime.datetime.fromisoformat(e['created']) >= cutoff}
+            yield table
+            write_private(self.permissions_path, json.dumps(table))
+        finally:
+            os.close(fd)
+
+    async def on_permission_request(self, params: Dict) -> None:
+        """Relay a permission prompt to the Chat thread this session last heard from."""
+        if not self.last_thread:
+            # Nobody here talks to this session through Chat; the terminal dialog stays.
+            logger.info("Permission request %s not relayed: no Chat thread yet", params.get('request_id'))
+            return
+        space, thread = self.last_thread
+        text = permission_prompt(params)
+        sent = await send_space_message(space, text, thread_name=thread)
+        with self._permissions() as table:
+            table[params['request_id']] = {
+                'owner': self._token, 'space': space, 'message': sent['name'], 'text': text,
+                'created': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+
+    def _record_verdict(self, space: str, request_id: str, behavior: str, by: str) -> Optional[Dict]:
+        """Store an answer for its owner to pick up. Only a prompt posted in this space counts."""
+        with self._permissions() as table:
+            entry = table.get(request_id)
+            if not entry or entry['space'] != space or 'behavior' in entry:
+                return None
+            entry.update(behavior=behavior, by=by)
+            return dict(entry)
+
+    def _take_verdicts(self) -> List[Tuple[str, str]]:
+        """This session's answered prompts, removed from the table."""
+        if not self.permissions_path.exists():
+            return []
+        with self._permissions() as table:
+            mine = [(rid, e['behavior']) for rid, e in table.items()
+                    if e['owner'] == self._token and 'behavior' in e]
+            for rid, _ in mine:
+                del table[rid]
+        return mine
+
     def poller_status(self) -> Dict:
         lease = self._read_lease()
         if not lease:
@@ -262,6 +359,7 @@ class Channel:
         creds = self._creds()
         chat = _get_service('chat', 'v1', creds)
         out = []
+        self._answered: List[Tuple[str, str, str, str]] = []
         for space_name, config in spaces.items():
             if space_name not in self.cursors:
                 self.cursors[space_name] = self._now()
@@ -276,6 +374,12 @@ class Channel:
                 continue
             for msg in response.get('messages', []):
                 self.cursors[space_name] = msg['createTime']
+                verdict = parse_verdict(msg, config['allowed_senders'])
+                if verdict:
+                    # An answer to a permission prompt goes to the session that asked,
+                    # never to Claude as chat.
+                    self._answered.append((space_name, *verdict, get_user_display_name(msg.get('sender', {}), creds)))
+                    continue
                 if not should_deliver(msg, config['allowed_senders'], config['mention_only']):
                     continue
                 sender_name = get_user_display_name(msg.get('sender', {}), creds)
@@ -295,6 +399,11 @@ class Channel:
         finally:
             self.release()
 
+    @staticmethod
+    async def _notify(write_stream, method: str, params: Dict) -> None:
+        notification = types.JSONRPCNotification(jsonrpc='2.0', method=method, params=params)
+        await write_stream.send(SessionMessage(types.JSONRPCMessage(notification)))
+
     async def _poll_forever(self, write_stream) -> None:
         while True:
             try:
@@ -303,10 +412,19 @@ class Channel:
                 # and httplib2 is not thread-safe.
                 if self.try_acquire():
                     for params in self.poll_once():
-                        notification = types.JSONRPCNotification(
-                            jsonrpc='2.0', method=CHANNEL_METHOD, params=params)
-                        await write_stream.send(SessionMessage(types.JSONRPCMessage(notification)))
+                        meta = params.get('meta', {})
+                        if meta.get('chat_id') and meta.get('thread_name'):
+                            self.last_thread = (meta['chat_id'], meta['thread_name'])
+                        await self._notify(write_stream, CHANNEL_METHOD, params)
                     self._save_cursors()
+                    for space, rid, behavior, by in self._answered:
+                        entry = self._record_verdict(space, rid, behavior, by)
+                        if entry:
+                            word = 'Allowed' if behavior == 'allow' else 'Denied'
+                            await update_message(entry['message'], text=f"{entry['text']}\n*{word}* by {by}.")
+                # Every session, poller or not, applies the answers to its own prompts.
+                for rid, behavior in self._take_verdicts():
+                    await self._notify(write_stream, PERMISSION_METHOD, {'request_id': rid, 'behavior': behavior})
             except Exception:
                 # Missing credentials or a failed state read must not kill the MCP server.
                 logger.exception("Google Chat channel poll failed")

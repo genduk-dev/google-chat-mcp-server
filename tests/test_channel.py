@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -207,6 +208,80 @@ class RunTest(unittest.TestCase):
             self.assertGreater(len(sent), 0)
 
         anyio.run(scenario)
+
+
+class PermissionRelayTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.state = Path(self.dir.name) / 'channel_state.json'
+        ChannelStore(self.state).save({SPACE: {'allowed_senders': [OWNER], 'mention_only': True}})
+
+    def channel(self):
+        return Channel(ChannelStore(self.state), 5)
+
+    def test_verdict_format(self):
+        cases = {'yes abcde': ('abcde', 'allow'), 'n ABCDE': ('abcde', 'deny'), 'Y abcde ': ('abcde', 'allow'),
+                 '@genduk no qwert': ('qwert', 'deny')}
+        for text, expected in cases.items():
+            self.assertEqual(channel.parse_verdict(message('m', text=text), [OWNER]), expected, text)
+        for text in ['yes', 'approve abcde', 'yes abcdl', 'yes abcdef', 'sure yes abcde']:
+            self.assertIsNone(channel.parse_verdict(message('m', text=text), [OWNER]), text)
+
+    def test_verdict_needs_an_allowed_sender_and_not_our_own_message(self):
+        self.assertIsNone(channel.parse_verdict(message('m', sender=OTHER, text='yes abcde'), [OWNER]))
+        own = message('m', text='yes abcde', client_id=f'{APP_MESSAGE_PREFIX}x')
+        self.assertIsNone(channel.parse_verdict(own, [OWNER]))
+
+    def test_prompt_shows_untrusted_fields_as_code(self):
+        text = channel.permission_prompt({'request_id': 'abcde', 'tool_name': 'Bash',
+                                          'description': 'ping <users/all> `x`', 'input_preview': '{"command": "ls"}'})
+        self.assertIn("`ping <users/all> 'x'`", text)
+        self.assertIn('```\n{"command": "ls"}\n```', text)
+        self.assertTrue(text.endswith('Reply `yes abcde` to allow or `no abcde` to deny.'))
+
+    def test_request_without_a_chat_thread_is_not_relayed(self):
+        ch = self.channel()
+        with mock.patch.object(channel, 'send_space_message') as send:
+            asyncio.run(ch.on_permission_request({'request_id': 'abcde', 'tool_name': 'Bash'}))
+        send.assert_not_called()
+
+    def ask(self, owner, rid='abcde'):
+        owner.last_thread = (SPACE, f'{SPACE}/threads/T1')
+        sent = mock.AsyncMock(return_value={'name': f'{SPACE}/messages/P1'})
+        with mock.patch.object(channel, 'send_space_message', sent):
+            asyncio.run(owner.on_permission_request({'request_id': rid, 'tool_name': 'Bash',
+                                                     'description': 'd', 'input_preview': 'p'}))
+        return sent
+
+    def test_answer_read_by_another_poller_reaches_the_session_that_asked(self):
+        asker, poller = self.channel(), self.channel()
+        sent = self.ask(asker)
+        self.assertEqual(sent.call_args.kwargs['thread_name'], f'{SPACE}/threads/T1')
+        self.assertIsNone(poller._record_verdict('spaces/OTHER', 'abcde', 'allow', 'Husni'))  # wrong space
+        self.assertEqual(poller._record_verdict(SPACE, 'abcde', 'allow', 'Husni')['message'], f'{SPACE}/messages/P1')
+        self.assertIsNone(poller._record_verdict(SPACE, 'abcde', 'deny', 'Husni'))  # first answer wins
+        self.assertEqual(poller._take_verdicts(), [])  # not the poller's request
+        self.assertEqual(asker._take_verdicts(), [('abcde', 'allow')])
+        self.assertEqual(asker._take_verdicts(), [])  # delivered once
+
+    def test_unanswered_requests_expire(self):
+        asker = self.channel()
+        self.ask(asker)
+        with mock.patch.object(channel, 'PERMISSION_TTL', channel.datetime.timedelta(0)):
+            self.assertIsNone(asker._record_verdict(SPACE, 'abcde', 'allow', 'Husni'))
+
+    def test_poll_turns_an_answer_into_a_verdict_not_chat(self):
+        ch = self.channel()
+        ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
+        chat = mock.MagicMock()
+        chat.spaces().messages().list.return_value.execute.return_value = {'messages': [
+            message('m1', text='yes abcde', create_time='2026-09-18T06:00:01Z')]}
+        with mock.patch.object(channel, 'get_credentials', return_value=object()), \
+                mock.patch.object(channel, '_get_service', return_value=chat), \
+                mock.patch.object(channel, 'get_user_display_name', return_value='Husni'):
+            self.assertEqual(ch.poll_once(), [])
+        self.assertEqual(ch._answered, [(SPACE, 'abcde', 'allow', 'Husni')])
 
 
 class PollerLockTest(unittest.TestCase):

@@ -1,6 +1,7 @@
 # server.py
 import argparse
 import json
+import logging
 from typing import List, Dict
 
 from fastmcp import FastMCP
@@ -10,6 +11,7 @@ from auth_cli import run_cli_auth
 
 # Create an MCP server
 mcp = FastMCP("Google Chat")
+logger = logging.getLogger(__name__)
 
 
 def _json(result) -> str:
@@ -522,7 +524,7 @@ def run_channel(args) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
     from mcp.shared.message import SessionMessage
-    from channel import Channel, ChannelStore, INSTRUCTIONS
+    from channel import Channel, ChannelStore, INSTRUCTIONS, PERMISSION_REQUEST_METHOD
 
     state_path = Path(args.channel_state_path or Path(args.token_path).parent / 'channel_state.json')
     channel = Channel(ChannelStore(state_path), args.poll_seconds)
@@ -568,25 +570,38 @@ def run_channel(args) -> None:
 
     server = mcp._mcp_server
     server.instructions = INSTRUCTIONS
+    # Permission relay is safe to offer: only allowlisted senders can answer.
     options = server.create_initialization_options(
-        experimental_capabilities={'claude/channel': {}})
+        experimental_capabilities={'claude/channel': {}, 'claude/channel/permission': {}})
 
     async def main():
         initialized = anyio.Event()
         to_server, from_client = anyio.create_memory_object_stream(0)
 
-        async def relay(read_stream):
-            # Passes every client message to the server, noting when the handshake ends.
+        async def relay(read_stream, tg):
+            # Passes client messages to the server, noting when the handshake ends.
+            # Permission requests are Claude Code extensions the MCP SDK would drop,
+            # so the channel takes them here.
             async with to_server:
                 async for message in read_stream:
-                    if (isinstance(message, SessionMessage)
-                            and getattr(message.message.root, 'method', None) == 'notifications/initialized'):
+                    method = getattr(message.message.root, 'method', None) if isinstance(message, SessionMessage) else None
+                    if method == 'notifications/initialized':
                         initialized.set()
+                    elif method == PERMISSION_REQUEST_METHOD:
+                        tg.start_soon(relay_permission, message.message.root.params)
+                        continue
                     await to_server.send(message)
+
+        async def relay_permission(params):
+            try:
+                await channel.on_permission_request(params)
+            except Exception:
+                # The terminal dialog is still open, so a failed relay loses nothing.
+                logger.exception("Relaying permission request failed")
 
         async with stdio_server() as (read_stream, write_stream):
             async with anyio.create_task_group() as tg:
-                tg.start_soon(relay, read_stream)
+                tg.start_soon(relay, read_stream, tg)
                 tg.start_soon(channel.run, write_stream, initialized)
                 await server.run(from_client, write_stream, options)
                 tg.cancel_scope.cancel()
