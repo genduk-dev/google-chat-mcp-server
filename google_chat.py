@@ -409,10 +409,18 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
                 display_name = names[0].get('displayName', user_id)
                 _user_display_name_cache[user_id] = display_name
                 return display_name
-        except Exception:
-            pass
+        except HttpError as e:
+            if e.resp.status not in (403, 404):
+                # Transient (retries ran out, or a 5xx): try again on the next lookup.
+                logger.warning("Name lookup for %s failed with %s", user_id, e.resp.status)
+                return user_id
+        except Exception as e:
+            logger.warning("Name lookup for %s failed: %s", user_id, e)
+            return user_id
 
-    # Fallback: return user_id
+    # No name to be had: a deleted account (404), one we may not see (403), or an
+    # external person whose profile has no visible name. That will not change, so
+    # the ID stands in for the name for the rest of this process.
     _user_display_name_cache[user_id] = user_id
     return user_id
 

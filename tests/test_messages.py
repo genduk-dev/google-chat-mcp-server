@@ -340,6 +340,29 @@ class PinsAndLookupsTest(unittest.TestCase):
             with self.assertRaisesRegex(Exception, r'\(403\): Permission denied'):
                 google_chat._chat_request(None, 'GET', 'spaces:findGroupChats')
 
+    def lookup(self, outcome):
+        people = mock.MagicMock()
+        if isinstance(outcome, Exception):
+            people.people().get().execute.side_effect = outcome
+        else:
+            people.people().get().execute.return_value = outcome
+        with mock.patch.object(google_chat, '_get_service', return_value=people), \
+                mock.patch.dict(google_chat._user_display_name_cache, clear=True):
+            name = google_chat.get_user_display_name({'name': 'users/9', 'type': 'HUMAN'}, None)
+            return name, dict(google_chat._user_display_name_cache)
+
+    def http_error(self, status):
+        from googleapiclient.errors import HttpError
+        return HttpError(mock.Mock(status=status), b'{}')
+
+    def test_name_lookup_caches_only_lasting_answers(self):
+        self.assertEqual(self.lookup({'names': [{'displayName': 'Dewi'}]}), ('Dewi', {'users/9': 'Dewi'}))
+        self.assertEqual(self.lookup({'names': []}), ('users/9', {'users/9': 'users/9'}))        # external, no name
+        self.assertEqual(self.lookup(self.http_error(404)), ('users/9', {'users/9': 'users/9'}))  # deleted
+        self.assertEqual(self.lookup(self.http_error(503)), ('users/9', {}))                     # transient
+        self.assertEqual(self.lookup(self.http_error(429)), ('users/9', {}))
+        self.assertEqual(self.lookup(ConnectionError('reset')), ('users/9', {}))
+
     def test_error_detail_reads_both_error_shapes(self):
         def resp(body, text='raw'):
             return mock.Mock(json=mock.Mock(return_value=body), text=text)
