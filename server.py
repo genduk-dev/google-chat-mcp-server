@@ -341,9 +341,17 @@ async def find_group_chats(user_ids: List[str]) -> str:
 
 @mcp.tool()
 async def get_space(space_name: str) -> Dict:
-    """Details of one space: name, type, description and guidelines, history setting,
-    member count, access, when it was last active, and who may post, reply, manage
-    members or use @all (permissions: {setting: [roles allowed]}).
+    """Details of one space.
+
+    Returns:
+        {"space", "name"?, "type", "description"?, "guidelines"?, "members" (Google's
+        count of people who joined directly; it can leave out external people, so use
+        get_members for who is in it), "member_groups"?, "external_allowed"?, "discoverable"?, "history_off"?
+        (messages deleted after 24h), "threading"? (when not threaded), "created",
+        "last_active"?, "uri", "restricted"?: {setting: [roles allowed]}}.
+        Optional keys appear only when they differ from the usual: a private, threaded
+        space with history on, where every role may post, reply, manage members, use
+        @all and so on.
 
     Args:
         space_name: The space ('spaces/SPACE_ID')

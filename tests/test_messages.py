@@ -310,16 +310,23 @@ class PinsAndLookupsTest(unittest.TestCase):
             with self.assertRaisesRegex(Exception, r'\(403\): Permission denied'):
                 google_chat._chat_request(None, 'GET', 'spaces:findGroupChats')
 
-    def test_get_space_flattens_permission_settings(self):
+    def test_get_space_keeps_useful_fields_and_only_restricted_permissions(self):
         chat = mock.MagicMock()
-        chat.spaces().get().execute.return_value = {'name': SPACE, 'permissionSettings': {
-            'postMessages': {'managersAllowed': True, 'membersAllowed': True},
-            'manageApps': {'managersAllowed': True}}}
+        chat.spaces().get().execute.return_value = {
+            'name': SPACE, 'type': 'ROOM', 'displayName': 'Ops', 'spaceType': 'SPACE', 'customer': 'customers/C1',
+            'spaceThreadingState': 'THREADED_MESSAGES', 'spaceHistoryState': 'HISTORY_OFF',
+            'spaceDetails': {'description': 'On-call'}, 'membershipCount': {'joinedDirectHumanUserCount': 4},
+            'accessSettings': {'accessState': 'PRIVATE'}, 'createTime': '2023-02-17T02:44:34.85Z',
+            'lastActiveTime': '1970-01-01T00:00:00Z', 'spaceUri': 'https://chat.google.com/room/S',
+            'permissionSettings': {
+                'postMessages': {'managersAllowed': True, 'assistantManagersAllowed': True, 'membersAllowed': True},
+                'manageApps': {'managersAllowed': True}}}
         with mock.patch.object(google_chat, 'get_credentials', return_value=object()), \
                 mock.patch.object(google_chat, '_get_service', return_value=chat):
             space = asyncio.run(google_chat.get_space(SPACE))
-        self.assertEqual(space, {'name': SPACE, 'permissions': {'postMessages': ['managers', 'members'],
-                                                                'manageApps': ['managers']}})
+        self.assertEqual(space, {'space': SPACE, 'name': 'Ops', 'type': 'SPACE', 'description': 'On-call',
+                                 'members': 4, 'history_off': True, 'created': '2023-02-17T02:44:34Z',
+                                 'uri': 'https://chat.google.com/room/S', 'restricted': {'manageApps': ['managers']}})
 
     def test_get_member_reports_a_non_member_without_invented_fields(self):
         chat = mock.MagicMock()

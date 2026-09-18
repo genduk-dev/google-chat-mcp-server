@@ -1524,21 +1524,49 @@ async def find_group_chats(user_ids: List[str]) -> List[Dict]:
             for s in spaces]
 
 
+_PERMISSION_ROLES = {'managersAllowed': 'managers', 'assistantManagersAllowed': 'assistant_managers',
+                     'membersAllowed': 'members'}
+
+
 async def get_space(space_name: str) -> Dict:
-    """One space's details, with permissionSettings flattened to {setting: [roles allowed]}."""
+    """One space's details, keeping only what an agent acts on. Settings at their usual
+    value are left out: history on, threaded, private, every role allowed."""
     creds = get_credentials()
     if not creds:
         raise Exception("No valid credentials found. Please authenticate first.")
     space = _get_service('chat', 'v1', creds).spaces().get(name=space_name).execute()
-    if not _last_active(space):
-        space.pop('lastActiveTime', None)
-    permissions = space.pop('permissionSettings', None)
-    if permissions:
-        roles = {'managersAllowed': 'managers', 'assistantManagersAllowed': 'assistant_managers',
-                 'membersAllowed': 'members'}
-        space['permissions'] = {setting: [label for key, label in roles.items() if allowed.get(key)]
-                                for setting, allowed in permissions.items()}
-    return space
+    out = {'space': space['name']}
+    if space.get('displayName'):
+        out['name'] = space['displayName']
+    out['type'] = space.get('spaceType')
+    details = space.get('spaceDetails', {})
+    for key in ('description', 'guidelines'):
+        if details.get(key):
+            out[key] = details[key]
+    counts = space.get('membershipCount', {})
+    out['members'] = counts.get('joinedDirectHumanUserCount', 0)
+    if counts.get('joinedGroupCount'):
+        out['member_groups'] = counts['joinedGroupCount']
+    if space.get('externalUserAllowed'):
+        out['external_allowed'] = True
+    if space.get('accessSettings', {}).get('accessState') == 'DISCOVERABLE':
+        out['discoverable'] = True
+    if space.get('spaceHistoryState') == 'HISTORY_OFF':
+        out['history_off'] = True  # messages are deleted after 24 hours
+    if space.get('spaceThreadingState', 'THREADED_MESSAGES') != 'THREADED_MESSAGES':
+        out['threading'] = space['spaceThreadingState']
+    out['created'] = _short_time(space.get('createTime'))
+    if _last_active(space):
+        out['last_active'] = _short_time(space['lastActiveTime'])
+    out['uri'] = space.get('spaceUri')
+    restricted = {}
+    for setting, allowed in space.get('permissionSettings', {}).items():
+        roles = [label for key, label in _PERMISSION_ROLES.items() if allowed.get(key)]
+        if len(roles) < len(_PERMISSION_ROLES):
+            restricted[setting] = roles
+    if restricted:
+        out['restricted'] = restricted
+    return {k: v for k, v in out.items() if v is not None}
 
 
 async def get_member(space_name: str, user: str) -> Dict:
