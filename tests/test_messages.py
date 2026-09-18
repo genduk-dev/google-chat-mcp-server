@@ -80,6 +80,12 @@ class ListSpaceMessagesTest(unittest.TestCase):
         self.pages = [{'messages': [msg(f'm{i}') for i in range(1000)], 'nextPageToken': 'more'}]
         self.assertTrue(self.run_list(start_date=datetime.datetime(2026, 9, 18, tzinfo=datetime.timezone.utc))['truncated'])
 
+    def test_after_filter_and_more_flag(self):
+        self.pages = [{'messages': [msg('m2'), msg('m1')], 'nextPageToken': 'older'}]
+        result = self.run_list(limit=2, after='2026-09-18T09:00:00Z')
+        self.assertEqual(self.list_kwargs()[0]['filter'], 'createTime > "2026-09-18T09:00:00Z"')
+        self.assertTrue(result['more'])
+
     def test_optional_fields_are_compacted(self):
         self.pages = [{'messages': [msg(
             'T1.b', quotedMessageMetadata={'name': f'{SPACE}/messages/T1.a'},
@@ -170,6 +176,41 @@ class ToChatMarkupTest(unittest.TestCase):
     def test_rendered_text_round_trips_to_the_same_markup(self):
         m = {'formattedText': 'see <https://p.example/q|Pisang> *now*'}
         self.assertEqual(google_chat.to_chat_markup(google_chat.message_text(m)), m['formattedText'])
+
+
+class SpaceUnreadTest(unittest.TestCase):
+    ME, OTHER = 'users/me1', 'users/o1'
+
+    def run_unread(self, space, read_state, page):
+        http = mock.Mock()
+        http.get.side_effect = [mock.Mock(json=mock.Mock(return_value=read_state)),
+                                mock.Mock(json=mock.Mock(return_value=page))]
+        with mock.patch.object(google_chat, '_http', return_value=http):
+            return google_chat._space_unread(None, space, self.ME), http
+
+    def space(self, **kw):
+        return {'name': SPACE, 'displayName': 'Ops', 'spaceType': 'SPACE',
+                'lastActiveTime': '2026-09-18T10:00:00.5Z', **kw}
+
+    def test_space_read_after_its_last_activity_is_skipped_without_listing(self):
+        result, http = self.run_unread(self.space(), {'lastReadTime': '2026-09-18T10:00:01Z'}, {})
+        self.assertIsNone(result)
+        self.assertEqual(http.get.call_count, 1)
+
+    def test_counts_only_others_messages_after_the_read_marker(self):
+        page = {'messages': [{'sender': {'name': self.OTHER}}, {'sender': {'name': self.ME}}]}
+        result, http = self.run_unread(self.space(), {'lastReadTime': '2026-09-18T09:00:00Z'}, page)
+        self.assertEqual((result['unread'], result['name'], result['last_read']), (1, 'Ops', '2026-09-18T09:00:00Z'))
+        self.assertEqual(http.get.call_args.kwargs['params']['filter'], 'createTime > "2026-09-18T09:00:00Z"')
+
+    def test_only_own_messages_means_nothing_unread(self):
+        page = {'messages': [{'sender': {'name': self.ME}}]}
+        self.assertIsNone(self.run_unread(self.space(), {'lastReadTime': '2026-09-18T09:00:00Z'}, page)[0])
+
+    def test_more_than_a_page_is_capped_and_dm_is_named_after_senders(self):
+        page = {'messages': [{'sender': {'name': self.OTHER, 'displayName': 'Andri'}}], 'nextPageToken': 'x'}
+        result, _ = self.run_unread(self.space(displayName='', spaceType='DIRECT_MESSAGE'), {}, page)
+        self.assertEqual((result['unread'], result['name'], result['last_read']), ('1+', 'Andri', None))
 
 if __name__ == '__main__':
     unittest.main()

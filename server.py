@@ -92,6 +92,51 @@ async def get_messages(space_name: str,
     return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
 @mcp.tool()
+async def list_unread_spaces(days: int = 1) -> str:
+    """Find the spaces, DMs and group chats with messages you have not read yet.
+
+    Checks every space active in the last `days` days (1-90) against your read marker,
+    so it answers "what haven't I read". Your own messages never count as unread.
+    DMs and group chats are named after who wrote the unread messages. Some spaces
+    have a read marker months old (read only via notifications), so counts are capped
+    at "100+". Read one with get_unread_messages, then mark it with mark_space_read.
+
+    Returns:
+        {"since", "checked", "spaces": [{"space", "name", "type", "unread", "last_read", "latest"}]},
+        most recently active first.
+    """
+    from google_chat import list_unread_spaces as _list
+    return json.dumps(await _list(days), ensure_ascii=False, separators=(',', ':'))
+
+@mcp.tool()
+async def get_unread_messages(space_name: str, limit: int = 50) -> str:
+    """Read the messages you have not read in one space: those created after your read marker.
+
+    Returns the newest `limit` (1-1000) in get_messages' thread-grouped format, plus
+    "last_read"; "more": true means older unread messages exist beyond the limit.
+    Reading does not mark them read; call mark_space_read for that.
+
+    Args:
+        space_name: The space to read ('spaces/SPACE_ID')
+        limit: How many of the newest unread messages to return
+    """
+    from google_chat import get_unread_messages as _get
+    return json.dumps(await _get(space_name, limit), ensure_ascii=False, separators=(',', ':'))
+
+@mcp.tool()
+async def mark_space_read(space_name: str) -> Dict:
+    """Mark everything in a space as read, as if you had opened it in Google Chat.
+
+    This changes your real read state, so only do it when the user asked to, or after
+    reading the unread messages on their behalf.
+
+    Args:
+        space_name: The space to mark read ('spaces/SPACE_ID')
+    """
+    from google_chat import mark_space_read as _mark
+    return await _mark(space_name)
+
+@mcp.tool()
 async def search_messages(query: str,
                           space_name: str = None,
                           limit: int = 50,

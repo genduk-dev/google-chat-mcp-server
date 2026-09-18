@@ -22,7 +22,8 @@ import anyio
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 
-from google_chat import APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text, _get_service
+from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text,
+                         self_user_id, _get_service)
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +64,6 @@ class ChannelStore:
         tmp.write_text(json.dumps({'spaces': spaces}, indent=2))
         os.chmod(tmp, 0o600)
         tmp.replace(self.path)
-
-
-def self_user_id(creds) -> str:
-    """The authenticated user as a Chat 'users/ID' name."""
-    person = _get_service('people', 'v1', creds).people().get(
-        resourceName='people/me', personFields='names').execute()
-    return person['resourceName'].replace('people/', 'users/')
 
 
 def mentions_bot(text: str) -> bool:

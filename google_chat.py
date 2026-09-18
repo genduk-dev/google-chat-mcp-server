@@ -1,4 +1,7 @@
 import os
+import asyncio
+import concurrent.futures
+import threading
 # Google may return additional scopes previously granted (include_granted_scopes),
 # so relax the strict scope-match check oauthlib otherwise enforces.
 os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
@@ -14,7 +17,7 @@ import urllib.error
 from typing import List, Dict, Optional, Tuple
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import AuthorizedSession, Request
 from googleapiclient.discovery import build
 from pathlib import Path
 
@@ -552,7 +555,8 @@ async def list_space_messages(space_name: str,
                               start_date: Optional[datetime.datetime] = None,
                               end_date: Optional[datetime.datetime] = None,
                               thread_name: Optional[str] = None,
-                              limit: Optional[int] = None):
+                              limit: Optional[int] = None,
+                              after: Optional[str] = None):
     """Lists messages from a Google Chat space, filtered by time and/or thread.
 
     Args:
@@ -562,9 +566,12 @@ async def list_space_messages(space_name: str,
         thread_name: Optional 'spaces/SPACE_ID/threads/THREAD_ID'; Google filters server-side,
                      so an old thread costs one request however many messages came after it
         limit: Optional number of most recent matching messages to return (1-1000)
+        after: Optional RFC 3339 time; only messages created after it
 
     Returns:
-        With filtering on: {'space', 'threads': [{'thread', 'messages': [...]}], 'truncated'?},
+        With filtering on: {'space', 'threads': [{'thread', 'messages': [...]}], 'more'?, 'truncated'?},
+        where 'more' means messages beyond limit matched and 'truncated' means the
+        1000-message cap cut a result without a limit short;
         threads ordered by their first returned message, messages oldest first.
         With --raw-messages: the raw message list.
 
@@ -592,12 +599,14 @@ async def list_space_messages(space_name: str,
                 filters.append(f"createTime > \"{day_start.isoformat()}\" AND createTime < \"{day_end.isoformat()}\"")
         if thread_name:
             filters.append(f"thread.name = {thread_name}")
+        if after:
+            filters.append(f'createTime > "{after}"')
 
         # With a limit, read newest first so the API stops after the last N.
         wanted = limit or MAX_MESSAGES
         messages = []
         page_token = None
-        truncated = False
+        truncated = more = False
         while True:
             list_args = {'parent': space_name, 'pageSize': min(wanted - len(messages), 1000)}
             if filters:
@@ -613,6 +622,7 @@ async def list_space_messages(space_name: str,
                 break
             if len(messages) >= wanted:
                 # Hitting a caller's limit is expected; hitting the cap is not.
+                more = bool(limit)
                 truncated = not limit
                 break
         if limit:
@@ -630,6 +640,8 @@ async def list_space_messages(space_name: str,
 
         result = {'space': space_name,
                   'threads': [{'thread': t, 'messages': msgs} for t, msgs in threads.items()]}
+        if more:
+            result['more'] = True
         if truncated:
             result['truncated'] = True
         return result
@@ -638,6 +650,128 @@ async def list_space_messages(space_name: str,
         raise
     except Exception as e:
         raise Exception(f"Failed to list messages in space: {str(e)}")
+
+
+_self_id_cache: Dict[str, str] = {}
+
+
+def self_user_id(creds: Credentials) -> str:
+    """The authenticated user as a Chat 'users/ID' name."""
+    if 'id' not in _self_id_cache:
+        person = _get_service('people', 'v1', creds).people().get(
+            resourceName='people/me', personFields='names').execute()
+        _self_id_cache['id'] = person['resourceName'].replace('people/', 'users/')
+    return _self_id_cache['id']
+
+
+CHAT_API = 'https://chat.googleapis.com/v1'
+UNREAD_WORKERS = 8
+_thread_local = threading.local()
+
+
+def _parse_time(ts: str) -> datetime.datetime:
+    return datetime.datetime.fromisoformat(ts.replace('Z', '+00:00'))
+
+
+def _http(creds: Credentials) -> AuthorizedSession:
+    """One HTTP session per worker thread; the cached googleapiclient services
+    use httplib2, which is not thread-safe."""
+    if getattr(_thread_local, 'session', None) is None:
+        _thread_local.session = AuthorizedSession(creds)
+    return _thread_local.session
+
+
+def _space_unread(creds: Credentials, space: Dict, self_id: str) -> Optional[Dict]:
+    """Unread summary for one space, or None when everything is read."""
+    http = _http(creds)
+    resp = http.get(f"{CHAT_API}/users/me/{space['name']}/spaceReadState")
+    resp.raise_for_status()
+    last_read = resp.json().get('lastReadTime')
+    if last_read and _parse_time(space['lastActiveTime']) <= _parse_time(last_read):
+        return None
+    params = {'pageSize': 100}
+    if last_read:
+        params['filter'] = f'createTime > "{last_read}"'
+    resp = http.get(f"{CHAT_API}/{space['name']}/messages", params=params)
+    resp.raise_for_status()
+    page = resp.json()
+    # Your own messages after the read marker are not unread for you.
+    others = [m for m in page.get('messages', []) if m.get('sender', {}).get('name') != self_id]
+    if not others:
+        return None
+    name = space.get('displayName')
+    if not name:
+        # DMs and group chats have no display name; show who wrote the unread messages.
+        senders = []
+        for m in others:
+            sender = m.get('sender', {}).get('displayName')
+            if sender and sender not in senders:
+                senders.append(sender)
+        name = ', '.join(senders[:3]) + (' and others' if len(senders) > 3 else '')
+    count = len(others)
+    return {'space': space['name'], 'name': name, 'type': space.get('spaceType'),
+            'unread': f'{count}+' if page.get('nextPageToken') else count,
+            'last_read': _short_time(last_read), 'latest': _short_time(space['lastActiveTime'])}
+
+
+async def list_unread_spaces(days: int = 1) -> Dict:
+    """Spaces with messages you have not read, among those active in the last `days` days.
+
+    Returns:
+        {'since', 'checked', 'spaces': [{'space', 'name', 'type', 'unread', 'last_read', 'latest'}]},
+        most recently active first. 'unread' is capped as '100+'.
+    """
+    if not 1 <= days <= 90:
+        raise ValueError("days must be between 1 and 90")
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    self_id = self_user_id(creds)
+    service = _get_service('chat', 'v1', creds)
+    spaces, page_token = [], None
+    while True:
+        response = service.spaces().list(pageSize=1000, **({'pageToken': page_token} if page_token else {})).execute()
+        spaces.extend(response.get('spaces', []))
+        page_token = response.get('nextPageToken')
+        if not page_token:
+            break
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    active = sorted((s for s in spaces if s.get('lastActiveTime') and _parse_time(s['lastActiveTime']) >= since),
+                    key=lambda s: s['lastActiveTime'], reverse=True)
+
+    def check(space):
+        return _space_unread(creds, space, self_id)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=UNREAD_WORKERS) as pool:
+        results = await asyncio.get_running_loop().run_in_executor(None, lambda: list(pool.map(check, active)))
+    return {'since': _short_time(since.isoformat().replace('+00:00', 'Z')), 'checked': len(active),
+            'spaces': [r for r in results if r]}
+
+
+async def get_unread_messages(space_name: str, limit: int = 50):
+    """Messages in a space created after your read marker, newest `limit`, in get_messages' format."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    state = _get_service('chat', 'v1', creds).users().spaces().getSpaceReadState(
+        name=f"users/me/{space_name}/spaceReadState").execute()
+    last_read = state.get('lastReadTime')
+    result = await list_space_messages(space_name, limit=limit, after=last_read)
+    if isinstance(result, dict):
+        result['last_read'] = _short_time(last_read)
+    return result
+
+
+async def mark_space_read(space_name: str) -> Dict:
+    """Move your read marker in a space to now."""
+    creds = get_credentials()
+    if not creds:
+        raise Exception("No valid credentials found. Please authenticate first.")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+    state = _get_service('chat', 'v1', creds).users().spaces().updateSpaceReadState(
+        name=f"users/me/{space_name}/spaceReadState", updateMask='lastReadTime',
+        body={'lastReadTime': now}).execute()
+    return {'space': space_name, 'last_read': _short_time(state.get('lastReadTime'))}
 
 
 def _chat_api_post(path: str, body: Dict, creds: Credentials) -> Dict:
