@@ -108,7 +108,9 @@ _pending_auth_flow: Optional[InstalledAppFlow] = None
 token_info = {
     'credentials': None,
     'last_refresh': None,
-    'token_path': DEFAULT_TOKEN_PATH
+    'token_path': DEFAULT_TOKEN_PATH,
+    # mtime of the token file the in-memory credentials came from, or were saved to
+    'mtime': None,
 }
 
 def set_token_path(path: str) -> None:
@@ -131,6 +133,15 @@ def set_filter_messages(enabled: bool) -> None:
     global FILTER_MESSAGES
     FILTER_MESSAGES = enabled
 
+def _load_token_file(token_path: Path) -> Credentials:
+    """Load a token with the scopes recorded in it, which are the ones granted.
+
+    Passing SCOPES here would make a refresh ask for exactly SCOPES: a token
+    granted fewer fails with invalid_scope, and one granted more is narrowed.
+    """
+    return Credentials.from_authorized_user_file(str(token_path))
+
+
 def save_credentials(creds: Credentials, token_path: Optional[str] = None) -> None:
     """Save credentials to file and update in-memory cache.
     
@@ -142,13 +153,16 @@ def save_credentials(creds: Credentials, token_path: Optional[str] = None) -> No
     if token_path is None:
         token_path = token_info['token_path']
     
-    # Save to file
+    # Written atomically: other server processes reload this file whenever it changes.
     token_path = Path(token_path)
-    with open(token_path, 'w') as token:
-        token.write(creds.to_json())
-    
+    tmp = token_path.with_suffix('.tmp')
+    tmp.write_text(creds.to_json())
+    os.chmod(tmp, 0o600)
+    tmp.replace(token_path)
+
     # Update in-memory cache
     token_info['credentials'] = creds
+    token_info['mtime'] = token_path.stat().st_mtime_ns
     token_info['last_refresh'] = datetime.datetime.now(datetime.timezone.utc)
 
 def get_credentials(token_path: Optional[str] = None) -> Optional[Credentials]:
@@ -164,14 +178,18 @@ def get_credentials(token_path: Optional[str] = None) -> Optional[Credentials]:
         token_path = token_info['token_path']
     
     creds = token_info['credentials']
-    
-    # If no credentials in memory, try to load from file
-    if not creds:
-        token_path = Path(token_path)
-        if token_path.exists():
-            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+
+    # Every server process (one per Claude Code session) shares the token file.
+    # Reload it whenever it changed, so a re-login or another process's refresh
+    # is picked up instead of being overwritten by this process's older token.
+    token_path = Path(token_path)
+    if token_path.exists():
+        mtime = token_path.stat().st_mtime_ns
+        if not creds or mtime != token_info['mtime']:
+            creds = _load_token_file(token_path)
             token_info['credentials'] = creds
-    
+            token_info['mtime'] = mtime
+
     # If we have credentials that need refresh
     if creds and creds.expired and creds.refresh_token:
         try:
@@ -201,8 +219,8 @@ async def refresh_token(token_path: Optional[str] = None) -> Tuple[bool, str]:
             token_path = Path(token_path)
             if not token_path.exists():
                 return False, "No token file found"
-            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-        
+            creds = _load_token_file(token_path)
+
         if not creds.refresh_token:
             return False, "No refresh token available"
         
@@ -675,10 +693,11 @@ def _parse_time(ts: str) -> datetime.datetime:
 
 def _http(creds: Credentials) -> AuthorizedSession:
     """One HTTP session per worker thread; the cached googleapiclient services
-    use httplib2, which is not thread-safe."""
-    if getattr(_thread_local, 'session', None) is None:
-        _thread_local.session = AuthorizedSession(creds)
-    return _thread_local.session
+    use httplib2, which is not thread-safe. A reloaded token gets a new session."""
+    session = getattr(_thread_local, 'session', None)
+    if session is None or session.credentials is not creds:
+        _thread_local.session = session = AuthorizedSession(creds)
+    return session
 
 
 def _space_unread(creds: Credentials, space: Dict, self_id: str) -> Optional[Dict]:
