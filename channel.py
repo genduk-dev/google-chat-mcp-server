@@ -163,7 +163,10 @@ class Channel:
         """Poll forever, writing channel notifications straight to the stdio write stream."""
         while True:
             try:
-                for params in await anyio.to_thread.run_sync(self.poll_once):
+                # Blocks the event loop like every tool call here does. A worker
+                # thread would share the cached httplib2 clients with tool calls,
+                # and httplib2 is not thread-safe.
+                for params in self.poll_once():
                     notification = types.JSONRPCNotification(
                         jsonrpc='2.0', method=CHANNEL_METHOD, params=params)
                     await write_stream.send(SessionMessage(types.JSONRPCMessage(notification)))
