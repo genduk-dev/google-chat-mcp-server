@@ -646,6 +646,7 @@ SPACE_TYPES = {'SPACE', 'GROUP_CHAT', 'DIRECT_MESSAGE'}
 # Space -> its link in the Chat web app, from spaceUri. Only Google knows
 # whether a space opens under /room/ or /dm/, and messages do not say.
 _space_links: Dict[str, str] = {}
+_space_names: Dict[str, str] = {}
 
 
 def _link(space: Dict) -> str:
@@ -653,6 +654,7 @@ def _link(space: Dict) -> str:
     uri = space.get('spaceUri') or f"https://chat.google.com/room/{space['name'].removeprefix('spaces/')}"
     link = uri.split('?')[0]
     _space_links[space['name']] = link
+    _space_names[space['name']] = space.get('displayName', '')
     return link
 
 
@@ -660,6 +662,13 @@ def space_link(space_name: str, creds: Credentials) -> str:
     if space_name not in _space_links:
         _space_links[space_name] = _link(_get_service('chat', 'v1', creds).spaces().get(name=space_name).execute())
     return _space_links[space_name]
+
+
+def space_display_name(space_name: str, creds: Credentials) -> str:
+    """A space's display name from the same cached spaces.get as its link; '' for a DM."""
+    if space_name not in _space_names:
+        _link(_get_service('chat', 'v1', creds).spaces().get(name=space_name).execute())
+    return _space_names[space_name]
 
 
 def _cache_space_links(space_names, creds: Credentials) -> None:

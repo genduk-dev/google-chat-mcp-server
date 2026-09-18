@@ -58,6 +58,14 @@ class NotificationTest(unittest.TestCase):
         for key in params['meta']:
             self.assertRegex(key, r'^[A-Za-z0-9_]+$')
 
+    def test_space_display_name_is_added_when_known(self):
+        params = to_notification(message('m1'), SPACE, 'Husni', space_title='Ruang Ngopi')
+        self.assertEqual(params['meta']['space_display_name'], 'Ruang Ngopi')
+        self.assertEqual(params['meta']['chat_id'], SPACE)
+
+    def test_space_display_name_is_left_out_when_unknown(self):
+        self.assertNotIn('space_display_name', to_notification(message('m1'), SPACE, 'Husni')['meta'])
+
     def test_attachment_names_are_appended(self):
         msg = message('m1', text='see file')
         msg['attachment'] = [{'contentName': 'log.txt'}]
@@ -131,6 +139,23 @@ class PollTest(unittest.TestCase):
         self.list_returns([message('old')])
         self.assertEqual(ch.poll_once(), [])
         self.assertIn(SPACE, ch.cursors)
+
+    def test_delivery_names_the_space(self):
+        ch = Channel(self.store, 5)
+        ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
+        self.list_returns([message('m1', create_time='2026-09-18T06:00:01Z')])
+        with mock.patch.object(channel, 'space_display_name', return_value='Husni'):
+            out = ch.poll_once()
+        self.assertEqual(out[0]['meta']['space_display_name'], 'Husni')
+
+    def test_delivery_survives_a_failed_space_lookup(self):
+        ch = Channel(self.store, 5)
+        ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
+        self.list_returns([message('m1', create_time='2026-09-18T06:00:01Z')])
+        with mock.patch.object(channel, 'space_display_name', side_effect=RuntimeError('boom')):
+            out = ch.poll_once()
+        self.assertEqual([n['content'] for n in out], ['hi'])
+        self.assertNotIn('space_display_name', out[0]['meta'])
 
     def test_delivers_gated_messages_and_advances_cursor(self):
         ch = Channel(self.store, 5)

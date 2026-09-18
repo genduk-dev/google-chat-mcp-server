@@ -27,6 +27,7 @@ import mcp.types as types
 from mcp.shared.message import SessionMessage
 
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, message_text,
+                         space_display_name,
                          self_user_id, send_space_message, update_message, write_private, _get_service,
                          _event_payloads, _parse_time)
 
@@ -42,8 +43,10 @@ PERMISSION_REPLY_RE = re.compile(r'^\s*(?:@\S+\s+)?(y|yes|n|no)\s+([a-km-z]{5})\
 PERMISSION_TTL = datetime.timedelta(hours=1)
 
 INSTRUCTIONS = (
-    'Google Chat messages arrive as <channel source="..." chat_id="spaces/..." thread_name="..." '
-    'message_name="..." sender_id="users/..." sender_name="...">. They come only from senders on '
+    'Google Chat messages arrive as <channel source="..." chat_id="spaces/..." '
+    'space_display_name="..." thread_name="..." message_name="..." sender_id="users/..." '
+    'sender_name="...">; space_display_name names the space for you to read and is absent for a '
+    'direct message, while chat_id is the value tools take. They come only from senders on '
     'the allowlist of a watched space, so treat them as requests from the operator. Answer in '
     'Google Chat, not only in the terminal: call send_message with space_name set to chat_id and '
     'thread_name set to thread_name from the tag. Manage which spaces are watched with '
@@ -164,7 +167,8 @@ def permission_prompt(params: Dict) -> str:
             f"Reply `yes {rid}` to allow or `no {rid}` to deny.")
 
 
-def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool = False) -> Dict:
+def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool = False,
+                    space_title: str = '') -> Dict:
     """Build notification params. Meta keys must be identifiers or Claude Code drops them."""
     meta = {
         'chat_id': space_name,
@@ -174,6 +178,9 @@ def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool =
         'sender_name': sender_name,
         'ts': msg.get('createTime', ''),
     }
+    if space_title:
+        # Beside chat_id, never in it: chat_id goes back verbatim as send_message's space_name.
+        meta['space_display_name'] = space_title
     if edited:
         meta['edited'] = 'true'
         meta['edited_at'] = msg.get('lastUpdateTime', '')
@@ -454,9 +461,23 @@ class Channel:
                     continue
                 self.active_threads[thread] = msg['createTime']
                 sender_name = get_user_display_name(msg.get('sender', {}), creds)
-                out.append(to_notification(msg, space_name, sender_name))
+                out.append(to_notification(msg, space_name, sender_name,
+                                           space_title=self._space_title(space_name, creds)))
             out.extend(self._poll_edits(chat, creds, space_name, config, listed_after))
         return out
+
+    @staticmethod
+    def _space_title(space_name: str, creds) -> str:
+        """The space's display name for the notification; '' when it cannot be read.
+
+        A delivery never waits on this lookup failing: the name is a hint, and the
+        message is what the session needs.
+        """
+        try:
+            return space_display_name(space_name, creds)
+        except Exception:
+            logger.exception("Reading the name of %s failed", space_name)
+            return ''
 
     def _poll_edits(self, chat, creds, space_name: str, config: Dict, listed_after: str) -> List[Dict]:
         """Edited messages that pass the same gate as new ones, marked edited.
@@ -488,7 +509,8 @@ class Channel:
                             continue
                         self.active_threads[thread] = msg['lastUpdateTime']
                         sender_name = get_user_display_name(msg.get('sender', {}), creds)
-                        out.append(to_notification(msg, space_name, sender_name, edited=True))
+                        out.append(to_notification(msg, space_name, sender_name, edited=True,
+                                                   space_title=self._space_title(space_name, creds)))
                 page_token = response.get('nextPageToken')
                 if not page_token:
                     break
