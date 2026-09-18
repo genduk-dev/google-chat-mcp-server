@@ -69,7 +69,24 @@ def _format_sent_message(result: Dict) -> Dict:
 MAX_MESSAGES = 1000
 DEFAULT_CALLBACK_URL = "http://localhost:8000/auth/callback"
 DEFAULT_TOKEN_PATH = 'token.json'
-APP_MESSAGE_PREFIX = os.environ.get('APP_MESSAGE_PREFIX', 'client-gchat-mcp-')
+def _parse_bot_name(raw: str) -> str:
+    """Lowercase BOT_NAME and check it fits a Google Chat custom message ID.
+
+    The ID is 'client-{name}-' plus 12 hex chars; Google allows only lowercase
+    letters, digits and hyphens, up to 63 characters in total.
+    """
+    name = raw.strip().lower()
+    if not re.fullmatch(r'[a-z0-9-]{1,43}', name):
+        raise ValueError(
+            f"BOT_NAME {raw!r} must be 1-43 letters, digits or hyphens to form a valid "
+            "Google Chat message ID")
+    return name
+
+
+# One name identifies the bot twice: the clientAssignedMessageId prefix that
+# marks messages this server sent, and the @mention the channel listens for.
+BOT_NAME = _parse_bot_name(os.environ.get('BOT_NAME', 'gchat-mcp'))
+APP_MESSAGE_PREFIX = f'client-{BOT_NAME}-'
 
 # Store credentials info
 token_info = {

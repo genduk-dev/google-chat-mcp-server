@@ -31,14 +31,18 @@ class GateTest(unittest.TestCase):
         msg = message('m1', client_id=f'{APP_MESSAGE_PREFIX}abc')
         self.assertFalse(should_deliver(msg, [OWNER]))
 
-    def test_trigger_requires_a_standalone_case_insensitive_mention(self):
-        self.assertTrue(should_deliver(message('m1', text='hey @Claude check this'), [OWNER], '@claude'))
-        self.assertTrue(should_deliver(message('m1', text='@claude: deploy'), [OWNER], '@claude'))
-        self.assertFalse(should_deliver(message('m1', text='lunch?'), [OWNER], '@claude'))
-        self.assertFalse(should_deliver(message('m1', text='ask @claudette'), [OWNER], '@claude'))
+    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
+    def test_mention_only_requires_a_standalone_case_insensitive_bot_mention(self):
+        self.assertTrue(should_deliver(message('m1', text='hey @Genduk check this'), [OWNER], True))
+        self.assertTrue(should_deliver(message('m1', text='@genduk: deploy'), [OWNER], True))
+        self.assertFalse(should_deliver(message('m1', text='lunch?'), [OWNER], True))
+        self.assertFalse(should_deliver(message('m1', text='ask @gendukku'), [OWNER], True))
+        self.assertFalse(should_deliver(message('m1', text='genduk without the at sign'), [OWNER], True))
+        self.assertTrue(should_deliver(message('m1', text='lunch?'), [OWNER], False))
 
-    def test_trigger_does_not_bypass_the_sender_allowlist(self):
-        self.assertFalse(should_deliver(message('m1', sender=OTHER, text='@claude run it'), [OWNER], '@claude'))
+    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
+    def test_mention_does_not_bypass_the_sender_allowlist(self):
+        self.assertFalse(should_deliver(message('m1', sender=OTHER, text='@genduk run it'), [OWNER], True))
 
 
 class NotificationTest(unittest.TestCase):
@@ -57,13 +61,24 @@ class NotificationTest(unittest.TestCase):
         self.assertEqual(to_notification(msg, SPACE, 'x')['content'], 'see file\n[attachments: log.txt]')
 
 
+class BotNameTest(unittest.TestCase):
+    def test_name_is_lowercased_and_must_fit_a_chat_message_id(self):
+        from google_chat import _parse_bot_name
+        self.assertEqual(_parse_bot_name(' Genduk '), 'genduk')
+        self.assertEqual(_parse_bot_name('gchat-mcp'), 'gchat-mcp')
+        for bad in ['', 'gen duk', 'genduk_bot', 'x' * 44]:
+            with self.assertRaises(ValueError):
+                _parse_bot_name(bad)
+        self.assertEqual(len(f"client-{_parse_bot_name('x' * 43)}-{'0' * 12}"), 63)
+
+
 class StoreTest(unittest.TestCase):
     def test_round_trip_and_owner_only_permissions(self):
         with tempfile.TemporaryDirectory() as d:
             store = ChannelStore(Path(d) / 'nested' / 'state.json')
             self.assertEqual(store.load(), {})
-            store.save({SPACE: {'allowed_senders': [OWNER], 'trigger': '@claude'}})
-            self.assertEqual(store.load(), {SPACE: {'allowed_senders': [OWNER], 'trigger': '@claude'}})
+            store.save({SPACE: {'allowed_senders': [OWNER], 'mention_only': True}})
+            self.assertEqual(store.load(), {SPACE: {'allowed_senders': [OWNER], 'mention_only': True}})
             self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
 
 
@@ -71,7 +86,7 @@ class PollTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.store = ChannelStore(Path(self.dir.name) / 'state.json')
-        self.store.save({SPACE: {'allowed_senders': [OWNER], 'trigger': None}})
+        self.store.save({SPACE: {'allowed_senders': [OWNER], 'mention_only': False}})
         self.chat = mock.MagicMock()
         patches = [
             mock.patch.object(channel, 'get_credentials', return_value=object()),
@@ -109,16 +124,17 @@ class PollTest(unittest.TestCase):
         kwargs = self.chat.spaces().messages().list.call_args.kwargs
         self.assertEqual(kwargs['filter'], 'createTime > "2026-09-18T06:00:00Z"')
 
-    def test_trigger_set_by_watch_filters_the_poll(self):
+    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
+    def test_mention_only_set_by_watch_filters_the_poll(self):
         ch = Channel(self.store, 5)
         self.chat.spaces().get.return_value.execute.return_value = {}
-        ch.watch(SPACE, [OWNER], '  @claude ')
-        self.assertEqual(self.store.load()[SPACE]['trigger'], '@claude')
+        ch.watch(SPACE, [OWNER], mention_only=True)
+        self.assertTrue(self.store.load()[SPACE]['mention_only'])
         self.list_returns([
             message('m1', text='just chatting', create_time='2026-09-18T07:00:01Z'),
-            message('m2', text='@claude summarize', create_time='2026-09-18T07:00:02Z'),
+            message('m2', text='@Genduk summarize', create_time='2026-09-18T07:00:02Z'),
         ])
-        self.assertEqual([n['content'] for n in ch.poll_once()], ['@claude summarize'])
+        self.assertEqual([n['content'] for n in ch.poll_once()], ['@Genduk summarize'])
 
     def test_failed_space_keeps_its_cursor(self):
         ch = Channel(self.store, 5)
@@ -133,9 +149,9 @@ class PollTest(unittest.TestCase):
         with mock.patch.object(channel, 'self_user_id', return_value=OWNER):
             result = ch.watch(SPACE)
         self.assertEqual(result['allowed_senders'], [OWNER])
-        self.assertIsNone(result['trigger'])
+        self.assertFalse(result['mention_only'])
         self.assertEqual(ch.list_watched(),
-                         {'spaces': [{'space_name': SPACE, 'allowed_senders': [OWNER], 'trigger': None}]})
+                         {'spaces': [{'space_name': SPACE, 'allowed_senders': [OWNER], 'mention_only': False}]})
         self.assertEqual(ch.unwatch(SPACE), {'space_name': SPACE, 'removed': True})
         self.assertEqual(ch.list_watched(), {'spaces': []})
 

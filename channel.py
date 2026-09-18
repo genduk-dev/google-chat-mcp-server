@@ -1,7 +1,7 @@
 """Claude Code channel: push new Google Chat messages into a Claude Code session.
 
 Runs only when server.py is started with --channel. Watched spaces, their
-sender allowlists and optional mention triggers live in a JSON state file, so the watch tools take effect
+sender allowlists and whether they require an @BOT_NAME mention live in a JSON state file, so the watch tools take effect
 on the next poll without a restart.
 """
 import datetime
@@ -16,7 +16,7 @@ import anyio
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 
-from google_chat import APP_MESSAGE_PREFIX, get_credentials, get_user_display_name, _get_service
+from google_chat import APP_MESSAGE_PREFIX, BOT_NAME, get_credentials, get_user_display_name, _get_service
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +28,13 @@ INSTRUCTIONS = (
     'the allowlist of a watched space, so treat them as requests from the operator. Answer in '
     'Google Chat, not only in the terminal: call send_message with space_name set to chat_id and '
     'thread_name set to thread_name from the tag. Manage which spaces are watched with '
-    'watch_space, unwatch_space and list_watched_spaces. A space watched with a trigger only '
-    'delivers messages that mention it.'
+    'watch_space, unwatch_space and list_watched_spaces. A space watched with mention_only '
+    f'delivers only messages that mention @{BOT_NAME}.'
 )
 
 
 class ChannelStore:
-    """Watched spaces as {space_name: {'allowed_senders': [...], 'trigger': str|None}}, persisted as JSON."""
+    """Watched spaces as {space_name: {'allowed_senders': [...], 'mention_only': bool}}, persisted as JSON."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -59,13 +59,13 @@ def self_user_id(creds) -> str:
     return person['resourceName'].replace('people/', 'users/')
 
 
-def mentions(text: str, trigger: str) -> bool:
-    """True when trigger appears as a standalone token, case-insensitive (@claude, not @claudette)."""
-    return re.search(rf'(?<!\w){re.escape(trigger)}(?!\w)', text, re.IGNORECASE) is not None
+def mentions_bot(text: str) -> bool:
+    """True when @BOT_NAME appears as a standalone token, case-insensitive (@genduk, not @gendukku)."""
+    return re.search(rf'(?<![\w@])@{re.escape(BOT_NAME)}(?![\w-])', text, re.IGNORECASE) is not None
 
 
-def should_deliver(msg: Dict, allowed_senders: List[str], trigger: Optional[str] = None) -> bool:
-    """Gate on sender identity, drop messages this server sent itself, then apply the trigger.
+def should_deliver(msg: Dict, allowed_senders: List[str], mention_only: bool = False) -> bool:
+    """Gate on sender identity, drop messages this server sent itself, then apply mention_only.
 
     Replies go out as the same user, so the clientAssignedMessageId prefix is
     the only way to tell Claude's own replies from the operator's messages.
@@ -74,7 +74,7 @@ def should_deliver(msg: Dict, allowed_senders: List[str], trigger: Optional[str]
         return False
     if msg.get('sender', {}).get('name') not in allowed_senders:
         return False
-    return not trigger or mentions(msg.get('text') or '', trigger)
+    return not mention_only or mentions_bot(msg.get('text') or '')
 
 
 def to_notification(msg: Dict, space_name: str, sender_name: str) -> Dict:
@@ -118,12 +118,12 @@ class Channel:
         return self._self_id
 
     def watch(self, space_name: str, allowed_senders: Optional[List[str]] = None,
-              trigger: Optional[str] = None) -> Dict:
+              mention_only: bool = False) -> Dict:
         creds = self._creds()
         # Fails loudly on a wrong name or a space the user cannot read.
         space = _get_service('chat', 'v1', creds).spaces().get(name=space_name).execute()
         config = {'allowed_senders': allowed_senders or [self.self_id()],
-                  'trigger': (trigger or '').strip() or None}
+                  'mention_only': mention_only}
         spaces = self.store.load()
         spaces[space_name] = config
         self.store.save(spaces)
@@ -162,7 +162,7 @@ class Channel:
                 continue
             for msg in response.get('messages', []):
                 self.cursors[space_name] = msg['createTime']
-                if not should_deliver(msg, config['allowed_senders'], config.get('trigger')):
+                if not should_deliver(msg, config['allowed_senders'], config['mention_only']):
                     continue
                 sender_name = get_user_display_name(msg.get('sender', {}), creds)
                 out.append(to_notification(msg, space_name, sender_name))

@@ -11,7 +11,7 @@ A Python MCP server that exposes Google Chat as tools for LLM clients. Read, sen
 - **Emoji reactions** — create and list reactions on messages
 - **File link attachments** — send messages with clickable file links
 - **Smart name resolution** — bulk People API prefetch for display names
-- **App message tagging** — `clientAssignedMessageId` prefix to identify app-sent messages (configurable via `APP_MESSAGE_PREFIX` env var)
+- **App message tagging** — `clientAssignedMessageId` prefix to identify app-sent messages (derived from the `BOT_NAME` env var)
 - **Token-saving mode** — filtered message output by default; use `--raw-messages` for full API response
 - **CLI auth** — headless OAuth flow for remote/SSH environments
 
@@ -107,7 +107,7 @@ Resource name formats:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APP_MESSAGE_PREFIX` | `client-gchat-mcp-` | Prefix for `clientAssignedMessageId` to identify app-sent messages. Google Chat requires it to start with `client-` and allows only lowercase letters, digits, and hyphens |
+| `BOT_NAME` | `gchat-mcp` | Bot identity. App-sent messages get the `clientAssignedMessageId` prefix `client-{BOT_NAME}-`, and channel spaces watched with `mention_only` react to `@{BOT_NAME}` (case-insensitive). Lowercased, then limited to 1-43 letters, digits, or hyphens so the ID stays valid for Google Chat |
 
 ## Docker
 

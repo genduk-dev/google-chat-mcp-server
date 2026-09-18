@@ -290,23 +290,24 @@ def run_channel(args) -> None:
     state_path = Path(args.channel_state_path or Path(args.token_path).parent / 'channel_state.json')
     channel = Channel(ChannelStore(state_path), args.poll_seconds)
 
-    def watch_space(space_name: str, allowed_senders: List[str] = None, trigger: str = None) -> Dict:
+    def watch_space(space_name: str, allowed_senders: List[str] = None, mention_only: bool = False) -> Dict:
         """Start pushing new messages from a Google Chat space into this Claude Code session,
         or replace the settings of a space that is already watched.
 
         Only messages from allowed_senders are delivered. When omitted, only the
-        authenticated user is allowed. With a trigger such as '@claude', only
-        messages that mention it are delivered; without one, every message from
-        an allowed sender is. Calling again replaces both settings, so pass the
-        current allowed_senders when you only want to change the trigger. Takes
+        authenticated user is allowed. With mention_only, only messages that
+        mention @BOT_NAME (case-insensitive) are delivered; without it, every
+        message from an allowed sender is. Calling again replaces both settings,
+        so pass the current allowed_senders when you only want to change
+        mention_only. Takes
         effect on the next poll; history before this call is never replayed.
 
         Args:
             space_name: The space to watch (format: 'spaces/SPACE_ID')
             allowed_senders: Optional list of 'users/USER_ID' whose messages are delivered
-            trigger: Optional word a message must mention to be delivered, e.g. '@claude'
+            mention_only: Deliver only messages that mention @BOT_NAME
         """
-        return channel.watch(space_name, allowed_senders, trigger)
+        return channel.watch(space_name, allowed_senders, mention_only)
 
     def unwatch_space(space_name: str) -> Dict:
         """Stop pushing messages from a Google Chat space into this session.
