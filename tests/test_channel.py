@@ -218,6 +218,15 @@ class PollTest(unittest.TestCase):
         self.events([self.edit_event(fresh, '2026-09-18T06:00:02Z')])
         self.assertEqual([n['content'] for n in ch.poll_once()], ['edited already'])
 
+    def test_edit_of_a_message_listed_in_the_same_second_is_not_delivered_twice(self):
+        ch = Channel(self.store, 5)
+        ch.cursors[SPACE] = ch.edit_cursors[SPACE] = '2026-09-18T06:00:03Z'   # _now() without a fraction
+        fresh = message('m1', text='edited already', create_time='2026-09-18T06:00:03.500000Z')
+        fresh['lastUpdateTime'] = '2026-09-18T06:00:04Z'
+        self.list_returns([fresh])
+        self.events([self.edit_event(fresh, '2026-09-18T06:00:04Z')])
+        self.assertEqual([n['content'] for n in ch.poll_once()], ['edited already'])
+
     def test_first_poll_starts_edit_tracking_from_now(self):
         ch = Channel(self.store, 5)
         self.list_returns([])
@@ -339,9 +348,14 @@ class PermissionRelayTest(unittest.TestCase):
             asyncio.run(ch.on_permission_request({'request_id': 'abcde', 'tool_name': 'Bash'}))
         send.assert_not_called()
 
-    def ask(self, owner, rid='abcde'):
-        owner.last_thread = (SPACE, f'{SPACE}/threads/T1')
-        sent = mock.AsyncMock(return_value={'name': f'{SPACE}/messages/P1'})
+    def ask(self, owner, rid='abcde', recorded=None):
+        owner.last_thread = (SPACE, f'{SPACE}/threads/T1', channel.datetime.datetime.now(channel.datetime.timezone.utc))
+
+        async def post(*args, **kwargs):
+            if recorded is not None:  # what another poller would see while the post is in flight
+                recorded.append(json.loads(owner.permissions_path.read_text()))
+            return {'name': f'{SPACE}/messages/P1'}
+        sent = mock.AsyncMock(side_effect=post)
         with mock.patch.object(channel, 'send_space_message', sent):
             asyncio.run(owner.on_permission_request({'request_id': rid, 'tool_name': 'Bash',
                                                      'description': 'd', 'input_preview': 'p'}))
@@ -357,6 +371,31 @@ class PermissionRelayTest(unittest.TestCase):
         self.assertEqual(poller._take_verdicts(), [])  # not the poller's request
         self.assertEqual(asker._take_verdicts(), [('abcde', 'allow')])
         self.assertEqual(asker._take_verdicts(), [])  # delivered once
+
+    def test_request_is_recorded_before_the_prompt_is_posted(self):
+        asker, seen = self.channel(), []
+        self.ask(asker, recorded=seen)
+        self.assertIn('abcde', seen[0])
+        self.assertEqual(json.loads(asker.permissions_path.read_text())['abcde']['message'], f'{SPACE}/messages/P1')
+
+    def test_no_relay_to_a_thread_the_conversation_left_long_ago(self):
+        ch = self.channel()
+        ch.last_thread = (SPACE, f'{SPACE}/threads/T1',
+                          channel.datetime.datetime.now(channel.datetime.timezone.utc) - channel.FOLLOWUP_WINDOW
+                          - channel.datetime.timedelta(seconds=1))
+        with mock.patch.object(channel, 'send_space_message') as send:
+            asyncio.run(ch.on_permission_request({'request_id': 'abcde', 'tool_name': 'Bash'}))
+        send.assert_not_called()
+
+    def test_multiline_description_stays_inside_code(self):
+        text = channel.permission_prompt({'request_id': 'abcde', 'tool_name': 'Web\nFetch',
+                                          'description': 'Fetch a page.\nSee [docs](https://evil.example) <users/all>',
+                                          'input_preview': 'p'})
+        first_line = text.split('\n')[0]
+        self.assertEqual(first_line, "🔐 Claude wants to use `Web Fetch`: "
+                                     "`Fetch a page. See [docs](https://evil.example) <users/all>`")
+        from google_chat import to_chat_markup
+        self.assertEqual(to_chat_markup(first_line), first_line)   # nothing converted outside code
 
     def test_unanswered_requests_expire(self):
         asker = self.channel()
@@ -376,6 +415,48 @@ class PermissionRelayTest(unittest.TestCase):
                 mock.patch.object(channel, 'get_user_display_name', return_value='Husni'):
             self.assertEqual(ch.poll_once(), [])
         self.assertEqual(ch._answered, [(SPACE, 'abcde', 'allow', 'Husni')])
+
+
+class ReviewTwoFixesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = ChannelStore(Path(self.dir.name) / 'state.json')
+
+    def test_poll_with_nothing_watched_leaves_no_stale_answers(self):
+        ch = Channel(self.store, 5)
+        ch._answered = [('x', 'y', 'allow', 'z')]
+        self.assertEqual(ch.poll_once(), [])
+        self.assertEqual(ch._answered, [])
+
+    def test_results_are_dropped_and_cursors_rolled_back_when_the_lease_moved(self):
+        import anyio
+        ch = Channel(self.store, 0.01)
+        ch.cursors = {SPACE: 'before'}
+        sent = []
+
+        class Stream:
+            async def send(self, message):
+                sent.append(message)
+
+        def poll():
+            ch.cursors[SPACE] = 'after'
+            return [{'content': 'x', 'meta': {}}]
+
+        async def scenario():
+            event = anyio.Event()
+            event.set()
+            with mock.patch.object(ch, 'try_acquire', side_effect=[True, False] + [False] * 50), \
+                    mock.patch.object(ch, 'poll_once', side_effect=poll), \
+                    mock.patch.object(ch, '_save_cursors') as save:
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(ch.run, Stream(), event)
+                    await anyio.sleep(0.05)
+                    tg.cancel_scope.cancel()
+            save.assert_not_called()
+
+        anyio.run(scenario)
+        self.assertEqual((sent, ch.cursors[SPACE]), ([], 'before'))
 
 
 class PollerLockTest(unittest.TestCase):

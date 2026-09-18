@@ -173,6 +173,14 @@ class UserNamesTest(unittest.TestCase):
         fields = google_chat._member_fields({'member': {'name': 'users/9', 'type': 'HUMAN'}})
         self.assertEqual(fields['display_name'], 'Budi')
 
+    def test_member_listing_sees_a_name_saved_by_another_session(self):
+        self.assertEqual(self.name({'name': 'users/9'}), 'users/9')   # 404 cached as the ID
+        path = Path(self.dir.name) / 'user_names.json'
+        path.write_text(json.dumps({'users/9': 'Budi'}))
+        os.utime(path, ns=(10**18, 10**18))
+        fields = google_chat._member_fields({'member': {'name': 'users/9', 'type': 'HUMAN'}})
+        self.assertEqual(fields['display_name'], 'Budi')
+
     def test_empty_name_removes_and_bad_ids_are_rejected(self):
         google_chat.set_user_name('users/9', 'Budi')
         self.assertEqual(google_chat.set_user_name('users/9', ' ')['saved_names'], 0)

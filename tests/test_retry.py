@@ -67,6 +67,9 @@ class RawHttpRetryTest(unittest.TestCase):
         self.assertFalse(retry.is_retry('POST', 502))
         self.assertTrue(retry.is_retry('GET', 502))
         self.assertFalse(retry.raise_on_status)
+        response = mock.Mock(headers={'Retry-After': '120'})
+        response.headers = {'Retry-After': '120'}
+        self.assertEqual(retry.get_retry_after(response), 30.0)
 
 
 class RawHttpRetryIntegrationTest(unittest.TestCase):

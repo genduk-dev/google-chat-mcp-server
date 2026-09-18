@@ -151,10 +151,15 @@ def permission_prompt(params: Dict) -> str:
     go in code, where Chat shows mention and link markup literally."""
     def code(text: str) -> str:
         return text.replace('`', "'")
+
+    def inline(text: str) -> str:
+        # An inline code span ends at a newline, and text after it would be live
+        # Chat markup; Claude Code folds whitespace already, but do not rely on it.
+        return code(' '.join(text.split()))
     rid = params['request_id']
     description = _summary(params.get('description', ''))
     preview = _middle_cut(params.get('input_preview', ''), PROMPT_PREVIEW_CHARS)
-    return (f"🔐 Claude wants to use `{code(params.get('tool_name', ''))}`: `{code(description)}`\n"
+    return (f"🔐 Claude wants to use `{inline(params.get('tool_name', ''))}`: `{inline(description)}`\n"
             f"```\n{code(preview)}\n```\n"
             f"Reply `yes {rid}` to allow or `no {rid}` to deny.")
 
@@ -192,9 +197,9 @@ class Channel:
         # Pending permission prompts and their verdicts. The session that asked may
         # not be the poller that reads the answer, so they meet in this file.
         self.permissions_path = store.path.with_name('channel_permissions.json')
-        # (space, thread) of the last message delivered to this session: where its
-        # permission prompts go.
-        self.last_thread: Optional[Tuple[str, str]] = None
+        # (space, thread, when) of the last message delivered to this session: where
+        # its permission prompts go while that conversation is recent.
+        self.last_thread: Optional[Tuple[str, str, datetime.datetime]] = None
         # Per-space cursor: only messages created after it are delivered, so
         # watching a space never replays history.
         self.cursors: Dict[str, str] = {}
@@ -206,6 +211,8 @@ class Channel:
         self._saved_at: Optional[datetime.datetime] = None
         self._token = uuid.uuid4().hex
         self.active = False
+        # Permission answers read by the last poll: (space, request_id, behavior, by)
+        self._answered: List[Tuple[str, str, str, str]] = []
 
     def _read_lease(self) -> Optional[Dict]:
         try:
@@ -312,17 +319,24 @@ class Channel:
 
     async def on_permission_request(self, params: Dict) -> None:
         """Relay a permission prompt to the Chat thread this session last heard from."""
-        if not self.last_thread:
-            # Nobody here talks to this session through Chat; the terminal dialog stays.
-            logger.info("Permission request %s not relayed: no Chat thread yet", params.get('request_id'))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if not self.last_thread or now - self.last_thread[2] > FOLLOWUP_WINDOW:
+            # No recent Chat conversation with this session: a prompt there would show
+            # the command or file contents to whoever is in that space, unasked.
+            logger.info("Permission request %s not relayed: no recent Chat thread", params.get('request_id'))
             return
-        space, thread = self.last_thread
+        space, thread, _ = self.last_thread
         text = permission_prompt(params)
+        rid = params['request_id']
+        # Record the request before posting it, so an answer read by another poller
+        # right after the post finds it.
+        with self._permissions() as table:
+            table[rid] = {'owner': self._token, 'space': space, 'message': None, 'text': text,
+                          'created': now.isoformat()}
         sent = await send_space_message(space, text, thread_name=thread)
         with self._permissions() as table:
-            table[params['request_id']] = {
-                'owner': self._token, 'space': space, 'message': sent['name'], 'text': text,
-                'created': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            if rid in table:
+                table[rid]['message'] = sent['name']
 
     def _record_verdict(self, space: str, request_id: str, behavior: str, by: str) -> Optional[Dict]:
         """Store an answer for its owner to pick up. Only a prompt posted in this space counts."""
@@ -402,13 +416,13 @@ class Channel:
 
     def poll_once(self) -> List[Dict]:
         """Fetch new messages from every watched space and return the notifications to send."""
+        self._answered = []
         spaces = self.store.load()
         if not spaces:
             return []
         creds = self._creds()
         chat = _get_service('chat', 'v1', creds)
         out = []
-        self._answered: List[Tuple[str, str, str, str]] = []
         for space_name, config in spaces.items():
             if space_name not in self.cursors:
                 self.cursors[space_name] = self.edit_cursors[space_name] = self._now()
@@ -464,7 +478,7 @@ class Channel:
                         msg = payload.get('message', {})
                         if msg.get('deleteTime') or not msg.get('lastUpdateTime'):
                             continue
-                        if msg['createTime'] > listed_after:
+                        if _parse_time(msg['createTime']) > _parse_time(listed_after):
                             continue  # listed in this poll already, in its edited form
                         if msg.get('clientAssignedMessageId', '').startswith(APP_MESSAGE_PREFIX):
                             continue  # Claude's own edits, including answered permission prompts
@@ -496,6 +510,19 @@ class Channel:
         finally:
             self.release()
 
+    async def _deliver(self, write_stream, notifications: List[Dict]) -> None:
+        for params in notifications:
+            meta = params.get('meta', {})
+            if meta.get('chat_id') and meta.get('thread_name'):
+                self.last_thread = (meta['chat_id'], meta['thread_name'], datetime.datetime.now(datetime.timezone.utc))
+            await self._notify(write_stream, CHANNEL_METHOD, params)
+        self._save_cursors()
+        for space, rid, behavior, by in self._answered:
+            entry = self._record_verdict(space, rid, behavior, by)
+            if entry and entry.get('message'):
+                word = 'Allowed' if behavior == 'allow' else 'Denied'
+                await update_message(entry['message'], text=f"{entry['text']}\n*{word}* by {by}.")
+
     @staticmethod
     async def _notify(write_stream, method: str, params: Dict) -> None:
         notification = types.JSONRPCNotification(jsonrpc='2.0', method=method, params=params)
@@ -508,17 +535,18 @@ class Channel:
                 # thread would share the cached httplib2 clients with tool calls,
                 # and httplib2 is not thread-safe.
                 if self.try_acquire():
-                    for params in self.poll_once():
-                        meta = params.get('meta', {})
-                        if meta.get('chat_id') and meta.get('thread_name'):
-                            self.last_thread = (meta['chat_id'], meta['thread_name'])
-                        await self._notify(write_stream, CHANNEL_METHOD, params)
-                    self._save_cursors()
-                    for space, rid, behavior, by in self._answered:
-                        entry = self._record_verdict(space, rid, behavior, by)
-                        if entry:
-                            word = 'Allowed' if behavior == 'allow' else 'Denied'
-                            await update_message(entry['message'], text=f"{entry['text']}\n*{word}* by {by}.")
+                    before = (dict(self.cursors), dict(self.edit_cursors), dict(self.active_threads))
+                    notifications = self.poll_once()
+                    # A long poll (retries, a slow API) can outlast the lease. If another
+                    # session took over meanwhile, it delivers from the saved cursors, so
+                    # delivering or saving here would duplicate or clobber its work. Roll
+                    # the cursors back instead; if the lease is still ours (the check only
+                    # hit a busy lock), the next poll fetches the same messages again.
+                    if self.try_acquire():
+                        await self._deliver(write_stream, notifications)
+                    else:
+                        self.cursors, self.edit_cursors, self.active_threads = before
+                        logger.warning("Channel lease changed during a poll; its results were not delivered")
                 # Every session, poller or not, applies the answers to its own prompts.
                 for rid, behavior in self._take_verdicts():
                     await self._notify(write_stream, PERMISSION_METHOD, {'request_id': rid, 'behavior': behavior})

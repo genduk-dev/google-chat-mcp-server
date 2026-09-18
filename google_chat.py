@@ -93,6 +93,11 @@ class _ChatRetry(Retry):
     def get_backoff_time(self):
         return _retry_delay(len(self.history) - 1)
 
+    def get_retry_after(self, response):
+        # Same 30s cap as the googleapiclient path; a longer wait blocks the event loop.
+        seconds = super().get_retry_after(response)
+        return None if seconds is None else min(seconds, 30.0)
+
 def _get_service(api: str, version: str, creds: Credentials) -> object:
     """Get or create a cached Google API service object."""
     cache_key = f"{api}:{version}:{creds.token}"
@@ -598,10 +603,11 @@ def _member_fields(membership: Dict) -> Dict:
     """A membership as get_members reports it. Names come from the cache prefetch fills."""
     member = membership.get('member', {})
     user_id = member.get('name', '')
+    saved = user_names()  # rereads a mapping another session changed, dropping stale cache entries
     return {
         'user_id': user_id,
         'display_name': (_user_display_name_cache.get(user_id) or member.get('displayName')
-                         or user_names().get(user_id) or user_id),
+                         or saved.get(user_id) or user_id),
         'mention': f'<{user_id}>',
         'type': member.get('type', 'HUMAN'),
         'role': membership.get('role', 'ROLE_MEMBER'),
@@ -1891,7 +1897,13 @@ async def set_my_status(state: Optional[str] = None, minutes: Optional[int] = No
         _chat_request(creds, 'POST', 'users/me/availability:markAsActive', json={})
     if status_text is not None or clear_status:
         body = {} if clear_status else {'customStatus': {'emoji': {'unicode': status_emoji}, 'text': status_text, **ttl}}
-        _chat_request(creds, 'PATCH', 'users/me/availability', params={'updateMask': 'customStatus'}, json=body)
+        try:
+            _chat_request(creds, 'PATCH', 'users/me/availability', params={'updateMask': 'customStatus'}, json=body)
+        except ChatApiError as e:
+            if state:
+                raise ChatApiError('PATCH', 'users/me/availability', e.status,
+                                   f"availability is now {state}, but the custom status was not changed: {e.detail}")
+            raise
     return _status(_chat_request(creds, 'GET', 'users/me/availability'))
 
 
