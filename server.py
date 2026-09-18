@@ -471,9 +471,11 @@ def authenticate() -> str:
     """Start (or restart) Google Chat OAuth authentication.
 
     Call this if another tool fails with a credentials/authentication error. It returns
-    an authorization URL - share it with the user and ask them to open it in a browser and
-    complete authorization. Once they do, call complete_authentication with the resulting
-    callback URL to finish.
+    an authorization URL: share it with the user and ask them to open it and authorize.
+    When the browser runs on this machine, the redirect finishes sign-in by itself
+    within 10 minutes and every tool uses the new token right away; nothing else to call.
+    Only when the browser is on another machine does the redirect fail to load; then
+    ask the user for the URL it tried to open and pass it to complete_authentication.
 
     Returns:
         The authorization URL for the user to open in a browser
@@ -485,11 +487,10 @@ def authenticate() -> str:
 def complete_authentication(callback_url: str) -> Dict:
     """Complete an in-progress OAuth flow for Google Chat.
 
-    Call authenticate first to start the flow and get the authorization URL. After the
-    user authorizes in their browser, it redirects to a
-    'http://localhost:8000/auth/callback?code=...&scope=...' URL - that page will likely
-    fail to load, but the URL in the browser's address bar is still valid. Pass that full
-    URL here as callback_url (a bare code also works).
+    Only needed when the browser ran on another machine than this server. Then the
+    redirect to 'http://localhost:PORT/?state=...&code=...' fails to load, but the URL in
+    that browser's address bar is still valid. Pass that full URL here as callback_url
+    (a bare code also works). Call authenticate first to start the flow.
 
     Args:
         callback_url: The full callback URL from the browser address bar after authorizing

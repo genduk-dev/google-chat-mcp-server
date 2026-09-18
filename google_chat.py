@@ -1,7 +1,9 @@
 import os
 import asyncio
 import concurrent.futures
+import http.server
 import threading
+import time
 # Google may return additional scopes previously granted (include_granted_scopes),
 # so relax the strict scope-match check oauthlib otherwise enforces.
 os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
@@ -1640,11 +1642,56 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
         raise Exception(f"Failed to download attachment: {str(e)}")
 
 
+AUTH_WAIT_SECONDS = 600
+
+
+class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+    """Receives the OAuth redirect on the loopback listener started by start_authentication()."""
+
+    def do_GET(self):
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if 'code' not in params and 'error' not in params:
+            self.send_error(404)  # e.g. the browser asking for /favicon.ico
+            return
+        if params.get('state', [None])[0] != self.server.state:
+            # Only the browser that opened our authorization URL may complete it.
+            self.send_error(400, 'OAuth state mismatch')
+            return
+        try:
+            if 'error' in params:
+                raise Exception(f"Authorization failed: {params['error'][0]}")
+            _exchange_code(self.server.flow, params['code'][0])
+            body, status = 'Google Chat MCP is authenticated. You can close this tab.', 200
+        except Exception as e:
+            logger.warning("OAuth callback failed: %s", e)
+            body, status = f'Authentication failed: {e}', 500
+        self.server.done = True
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def log_message(self, format, *args):
+        pass  # the default writes every request to stderr
+
+
+_auth_server: Optional[http.server.HTTPServer] = None
+
+
+def _serve_callback(server: http.server.HTTPServer) -> None:
+    deadline = time.monotonic() + AUTH_WAIT_SECONDS
+    with server:
+        while not server.done and time.monotonic() < deadline:
+            server.handle_request()
+
+
 def start_authentication(credentials_path: Optional[str] = None) -> str:
     """Starts an OAuth authentication flow and returns the authorization URL.
 
-    The user should open the URL, complete authorization, then pass the resulting
-    callback URL to complete_authentication() to finish the flow.
+    Google redirects the browser to a listener on a free loopback port, which
+    finishes the flow and saves the token by itself, for AUTH_WAIT_SECONDS.
+    When the browser runs on another machine that redirect fails; the user then
+    passes the URL it failed to load to complete_authentication().
 
     Args:
         credentials_path: Path to the OAuth client credentials.json file. If None, uses
@@ -1657,7 +1704,7 @@ def start_authentication(credentials_path: Optional[str] = None) -> str:
     Raises:
         Exception: If credentials.json is missing or the flow can't be created
     """
-    global _pending_auth_flow
+    global _pending_auth_flow, _auth_server
 
     if credentials_path is None:
         credentials_path = str(Path(token_info['token_path']).parent / 'credentials.json')
@@ -1668,28 +1715,46 @@ def start_authentication(credentials_path: Optional[str] = None) -> str:
             "and save it in the current directory."
         )
 
+    if _auth_server is not None:
+        _auth_server.done = True  # a restarted flow replaces the one still waiting
+    server = http.server.HTTPServer(('localhost', 0), _CallbackHandler)
+    server.timeout = 1
+    server.done = False
+
+    # A desktop OAuth client accepts any loopback port as the redirect.
     flow = InstalledAppFlow.from_client_secrets_file(
         str(creds_file),
         SCOPES,
-        redirect_uri=DEFAULT_CALLBACK_URL
+        redirect_uri=f"http://localhost:{server.server_address[1]}/"
     )
 
-    auth_url, _ = flow.authorization_url(
+    auth_url, state = flow.authorization_url(
         access_type='offline',
         prompt='consent',
         include_granted_scopes='true'
     )
 
-    _pending_auth_flow = flow
+    server.flow, server.state = flow, state
+    _pending_auth_flow, _auth_server = flow, server
+    threading.Thread(target=_serve_callback, args=(server,), daemon=True).start()
     return auth_url
+
+
+def _exchange_code(flow: InstalledAppFlow, code: str, token_path: Optional[str] = None) -> Credentials:
+    global _pending_auth_flow
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    save_credentials(creds, token_path)
+    _pending_auth_flow = None
+    return creds
 
 
 def complete_authentication(callback_url: str, token_path: Optional[str] = None) -> Dict:
     """Completes an OAuth flow started by start_authentication() using the callback URL.
 
     Args:
-        callback_url: The full callback URL from the browser address bar after authorizing
-                      (e.g. 'http://localhost:8000/auth/callback?code=...&scope=...'), or
+        callback_url: The URL the browser was redirected to after authorizing
+                      (e.g. 'http://localhost:PORT/?state=...&code=...&scope=...'), or
                       just the bare authorization code
         token_path: Optional path to save the token to. If None, uses the configured path.
 
@@ -1724,12 +1789,9 @@ def complete_authentication(callback_url: str, token_path: Optional[str] = None)
         code = callback_url
 
     try:
-        flow = _pending_auth_flow
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-
-        save_credentials(creds, token_path)
-
+        creds = _exchange_code(_pending_auth_flow, code, token_path)
+        if _auth_server is not None:
+            _auth_server.done = True
         return {
             'authenticated': True,
             'has_refresh_token': bool(creds.refresh_token),
