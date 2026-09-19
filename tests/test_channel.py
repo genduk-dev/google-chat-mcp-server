@@ -334,12 +334,13 @@ class SpaceCase(unittest.TestCase):
 
     def listing(self, **kwargs):
         call = mock.MagicMock()
-        if 'createTime >' in kwargs['filter'] and kwargs.get('orderBy') == 'createTime DESC':
+        if kwargs.get('orderBy') == 'createTime DESC':   # context the buffer does not hold
             self.gap_queries.append(kwargs['filter'])
-            call.execute.return_value = {'messages': list(reversed(self.gaps))}
-        elif kwargs['filter'].startswith('thread.name'):
-            thread = kwargs['filter'].split(' ')[2]
-            call.execute.return_value = {'messages': self.threads.get(thread, [])}
+            if kwargs['filter'].startswith('thread.name'):
+                thread = kwargs['filter'].split(' ')[2]
+                call.execute.return_value = {'messages': self.threads.get(thread, [])}
+            else:
+                call.execute.return_value = {'messages': list(reversed(self.gaps))}
         else:
             call.execute.return_value = {'messages': self.listed}
         return call
@@ -510,7 +511,7 @@ class PresenceTest(SpaceCase):
                         if c.kwargs['filter'].startswith('thread.name')]
         self.assertEqual(len(thread_calls), 1)
         self.assertEqual(thread_calls[0].kwargs['filter'],
-                         f'thread.name = {SPACE}/threads/OLD AND createTime < "{ts(0)}"')
+                         f'thread.name = {SPACE}/threads/OLD AND createTime > "{ts(1 - 86400)}" AND createTime < "{ts(0)}"')
 
     def test_a_thread_reply_gets_its_thread_not_the_main_flow(self):
         self.poll([self.m('a', OTHER, 'main flow chatter', 0, thread='A'),
@@ -1108,7 +1109,7 @@ class GatedSpaceTest(SpaceCase):
         self.assertIn('cache yang mana Nduk?', earlier)   # fetched: the buffer no longer reaches 10:03
         self.assertIn('obrolan 0', earlier)
         self.assertNotIn('@genduk ada ide?', earlier)     # seen at 10:00 already
-        self.assertEqual(self.gap_queries, [f'createTime > "{ts(120)}" AND createTime < "{ts(11100)}"'])
+        self.assertEqual(self.gap_queries[-1], f'createTime > "{ts(120)}" AND createTime < "{ts(11100)}"')
         texts = [m['text'] for m in self.jev.ask.call_args.args[0]['messages']]
         self.assertEqual(texts[:2], ['coba pakai cache', 'cache yang mana Nduk?'])
 
@@ -1161,6 +1162,17 @@ class GatedSpaceTest(SpaceCase):
         self.poll([], 1)
         self.assertEqual([json.loads(l)['at'] for l in self.ch.gate_log_path.read_text().splitlines()], [recent['at']])
         self.assertEqual(self.ch.gate_log_path.stat().st_mode & 0o777, 0o600)
+
+    def test_a_fresh_session_gets_what_came_before_it_started(self):
+        before = [self.m('o1', OTHER, 'kemarin deploy gagal', -3000), self.own('g0', 'udah aku rollback', -2900)]
+        self.gaps = before
+        out = self.poll([self.m('m1', OTHER, '@genduk terus gimana?', 0)], 1)
+        earlier = out[0]['content'].split('New:')[0]
+        self.assertIn('kemarin deploy gagal', earlier)
+        self.assertIn('[you, ', earlier)
+        self.assertEqual(self.gap_queries, [f'createTime > "{ts(1 - 86400)}" AND createTime < "{ts(0)}"'])
+        self.poll([self.m('m2', OTHER, '@genduk oke', 10)], 11)
+        self.assertEqual(len(self.gap_queries), 1)       # seen now, and the buffer covers the rest
 
     def test_list_watched_names_the_gate(self):
         self.ch.active = True

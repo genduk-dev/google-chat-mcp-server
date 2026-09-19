@@ -307,9 +307,8 @@ class SpaceState:
     # message name -> when it was noted: delivered to the session, or sent by it.
     seen: Dict[str, datetime.datetime] = dataclasses.field(default_factory=dict)
     bot_messages: Dict[str, datetime.datetime] = dataclasses.field(default_factory=dict)
-    # Messages fetched for context or to read a quote, by name, and threads fetched.
+    # Messages fetched to read a quote, by name.
     fetched: Dict[str, Dict] = dataclasses.field(default_factory=dict)
-    fetched_threads: Dict[str, datetime.datetime] = dataclasses.field(default_factory=dict)
     # Unaddressed messages waiting for the chat to pause: (message, flags, when queued).
     pending: List[Tuple[Dict, Flags, datetime.datetime]] = dataclasses.field(default_factory=list)
     deliveries: List[datetime.datetime] = dataclasses.field(default_factory=list)
@@ -350,7 +349,7 @@ class SpaceState:
 
     def prune(self, now: datetime.datetime) -> None:
         self.buffer = [m for m in self.buffer if now - _parse_time(m['createTime']) < BUFFER_WINDOW][-BUFFER_MAX:]
-        for table in (self.seen, self.bot_messages, self.fetched_threads):
+        for table in (self.seen, self.bot_messages):
             for key in [k for k, t in table.items() if now - t >= MEMORY_WINDOW]:
                 del table[key]
         self.fetched = dict(list(self.fetched.items())[-BUFFER_MAX:])
@@ -1045,10 +1044,12 @@ class Channel:
 
         That is the quoted messages, the rest of each thread a message replies in,
         and for a message in the main flow the recent main-flow messages before it.
-        A thread the poller never saw begin is fetched once. Where the session last
-        saw a conversation before the buffer reaches back (it held back or missed
-        messages for longer than BUFFER_WINDOW), the gap is fetched from Chat, so
-        a delivery hours later still carries what was said in between.
+        Where the buffer does not reach back far enough, Chat is asked: for a
+        conversation the session last saw before the buffer begins (it held back
+        or missed messages for longer than BUFFER_WINDOW), the gap since then, so
+        a delivery hours later still carries what was said in between. For one
+        this session has not seen at all, as after a restart, whatever the last
+        MEMORY_WINDOW holds, since a fresh session knows none of it.
         """
         new = {m['name'] for m, _ in batch}
         newest = max(m['createTime'] for m, _ in batch)
@@ -1064,25 +1065,13 @@ class Channel:
                 original = self._message(chat, state, quoted)
                 if original:
                     candidates[quoted] = original
-        for thread in threads - set(state.fetched_threads):
-            state.fetched_threads[thread] = self._clock()
-            first = min(m['createTime'] for m, _ in batch if _thread(m) == thread)
-            if any(_thread(m) == thread and m['createTime'] < first for m in state.buffer):
-                continue  # the buffer holds its start already
-            try:
-                listed = chat.spaces().messages().list(
-                    parent=thread.split('/threads/')[0], pageSize=CONTEXT_MESSAGES, orderBy='createTime DESC',
-                    filter=f'thread.name = {thread} AND createTime < "{first}"').execute()
-            except Exception:
-                logger.exception("Reading thread %s for context failed", thread)
-                continue
-            for msg in listed.get('messages', []):
-                candidates[msg['name']] = msg
         scopes = threads | ({'main'} if main_flow else set())
         for scope in scopes:
             since = state.seen_upto.get(scope)
-            if not since or any(m['createTime'] <= since for m in state.buffer):
-                continue  # never seen here (the buffer is all there is), or the buffer covers the gap
+            if since and any(m['createTime'] <= since for m in state.buffer):
+                continue  # the buffer covers the gap
+            if not since:
+                since = (self._clock() - MEMORY_WINDOW).isoformat().replace('+00:00', 'Z')
             first = min(m['createTime'] for m, _ in batch if _scope(m) == scope)
             query = f'createTime > "{since}" AND createTime < "{first}"'
             if scope != 'main':
@@ -1094,10 +1083,12 @@ class Channel:
                     parent=batch[0][0]['name'].split('/messages/')[0], pageSize=100, orderBy='createTime DESC',
                     filter=query).execute()
             except Exception:
-                logger.exception("Reading what the session missed in %s failed", scope)
+                logger.exception("Reading what the session has not seen in %s failed", scope)
                 continue
             for msg in listed.get('messages', []):
-                if _scope(msg) == scope:
+                # A thread's query holds only the thread, its first message included,
+                # which is not a reply. The main flow's holds replies too, to drop.
+                if scope != 'main' or not msg.get('threadReply'):
                     candidates[msg['name']] = msg
         earlier = sorted((m for name, m in candidates.items()
                           if name not in new and name not in state.seen
