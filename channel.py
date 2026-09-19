@@ -226,6 +226,11 @@ def _thread(msg: Dict) -> str:
     return msg.get('thread', {}).get('name', '')
 
 
+def _scope(msg: Dict) -> str:
+    """The conversation a message belongs to: the thread it replies in, or the main flow."""
+    return _thread(msg) if msg.get('threadReply') else 'main'
+
+
 def _same_words(a: str, b: str) -> bool:
     return a.casefold().split() == b.casefold().split()
 
@@ -288,6 +293,12 @@ class SpaceState:
     judged: Optional[Tuple[str, Decision]] = None
     gate_retry_at: Optional[datetime.datetime] = None
     silent: Dict[str, str] = dataclasses.field(default_factory=dict)
+    # Per conversation (a thread replied in, or the main flow): the createTime of
+    # the newest message the session has seen there, so a delivery after a long
+    # gap can fetch what it missed beyond the buffer; and the bot's last message
+    # there with the first one after it, so the gate knows the bot took part.
+    seen_upto: Dict[str, str] = dataclasses.field(default_factory=dict)
+    last_spoke: Dict[str, List[Dict]] = dataclasses.field(default_factory=dict)
 
     def is_active(self, at: datetime.datetime) -> bool:
         return (self.active_since is not None and at - self.last_addressed < PRESENCE_IDLE
@@ -306,6 +317,10 @@ class SpaceState:
     def remember(self, msg: Dict) -> None:
         self.buffer = [m for m in self.buffer if m['name'] != msg['name']] + [msg]
 
+    def saw(self, msg: Dict) -> None:
+        scope = _scope(msg)
+        self.seen_upto[scope] = max(self.seen_upto.get(scope, ''), msg['createTime'])
+
     def prune(self, now: datetime.datetime) -> None:
         self.buffer = [m for m in self.buffer if now - _parse_time(m['createTime']) < BUFFER_WINDOW][-BUFFER_MAX:]
         for table in (self.seen, self.bot_messages, self.fetched_threads):
@@ -314,6 +329,8 @@ class SpaceState:
         self.fetched = dict(list(self.fetched.items())[-BUFFER_MAX:])
         kept = {m['name'] for m in self.buffer}
         self.silent = {name: action for name, action in self.silent.items() if name in kept}
+        self.last_spoke = {scope: msgs for scope, msgs in self.last_spoke.items()
+                           if now - _parse_time(msgs[0]['createTime']) < MEMORY_WINDOW}
         self.deliveries = [t for t in self.deliveries if now - t < datetime.timedelta(hours=1)]
 
 
@@ -756,6 +773,8 @@ class Channel:
         if is_own(msg):
             state.remember(msg)
             state.seen[msg['name']] = state.bot_messages[msg['name']] = now
+            state.saw(msg)
+            state.last_spoke[_scope(msg)] = [msg]
             if state.is_active(at):
                 state.last_addressed = at  # the bot speaking keeps its presence going
             if self.gate:
@@ -765,6 +784,9 @@ class Channel:
         if not sender_allowed(msg, config.get('allowed_senders')):
             return
         state.remember(msg)
+        spoke = state.last_spoke.get(_scope(msg))
+        if spoke and len(spoke) == 1:
+            spoke.append(msg)
         flags = self._flags(chat, state, msg, operator)
         if self._muted(config, now) and not (flags.operator and flags.addressed):
             return
@@ -830,6 +852,7 @@ class Channel:
             content=self._content(creds, operator, batch, earlier, left_out), gate=gate, gate_reason=gate_reason)
         for msg in [m for m, _ in batch] + earlier:
             state.seen[msg['name']] = now
+            state.saw(msg)
         return notification
 
     def _gated(self, chat, creds, space_name: str, config: Dict, state: SpaceState, operator: str,
@@ -931,7 +954,11 @@ class Channel:
                 mentions_agent=flags.mentioned if flags else (not own and mentions_bot(msg.get('text') or '')),
                 replies_to_agent=flags.replying_to_bot if flags else quoted in state.bot_messages,
                 mentions_others=mentions_someone(msg), new=flags is not None, agent_action=state.silent.get(msg['name'], ''))
-        return ([gate_message(m, None) for m in history]
+        shown = {m['name'] for m in history} | set(pending)
+        scopes = {_scope(m) for m, _, _ in state.pending}
+        spoke = sorted((m for scope in scopes for m in state.last_spoke.get(scope, []) if m['name'] not in shown),
+                       key=lambda m: m['createTime'])
+        return ([gate_message(m, None) for m in spoke + history]
                 + [gate_message(m, f) for m, f, _ in state.pending])
 
     def _gate_log(self, entry: Dict) -> None:
@@ -947,7 +974,10 @@ class Channel:
 
         That is the quoted messages, the rest of each thread a message replies in,
         and for a message in the main flow the recent main-flow messages before it.
-        A thread the poller never saw begin is fetched once.
+        A thread the poller never saw begin is fetched once. Where the session last
+        saw a conversation before the buffer reaches back (it held back or missed
+        messages for longer than BUFFER_WINDOW), the gap is fetched from Chat, so
+        a delivery hours later still carries what was said in between.
         """
         new = {m['name'] for m, _ in batch}
         newest = max(m['createTime'] for m, _ in batch)
@@ -977,6 +1007,27 @@ class Channel:
                 continue
             for msg in listed.get('messages', []):
                 candidates[msg['name']] = msg
+        scopes = threads | ({'main'} if main_flow else set())
+        for scope in scopes:
+            since = state.seen_upto.get(scope)
+            if not since or any(m['createTime'] <= since for m in state.buffer):
+                continue  # never seen here (the buffer is all there is), or the buffer covers the gap
+            first = min(m['createTime'] for m, _ in batch if _scope(m) == scope)
+            query = f'createTime > "{since}" AND createTime < "{first}"'
+            if scope != 'main':
+                query = f'thread.name = {scope} AND {query}'
+            try:
+                # One page, newest first. A longer gap counts short in "left out",
+                # and get_messages has the rest.
+                listed = chat.spaces().messages().list(
+                    parent=batch[0][0]['name'].split('/messages/')[0], pageSize=100, orderBy='createTime DESC',
+                    filter=query).execute()
+            except Exception:
+                logger.exception("Reading what the session missed in %s failed", scope)
+                continue
+            for msg in listed.get('messages', []):
+                if _scope(msg) == scope:
+                    candidates[msg['name']] = msg
         earlier = sorted((m for name, m in candidates.items()
                           if name not in new and name not in state.seen
                           and (is_own(m) or sender_allowed(m, config.get('allowed_senders')))),

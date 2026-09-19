@@ -314,6 +314,8 @@ class SpaceCase(unittest.TestCase):
         self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {}
         self.listed = []
         self.threads = {}
+        self.gaps = []   # what Chat holds before the buffer, for a fetch of a gap
+        self.gap_queries = []
         self.chat.spaces().messages().list.side_effect = self.listing
         patches = [
             mock.patch.object(channel, 'get_credentials', return_value=object()),
@@ -331,7 +333,10 @@ class SpaceCase(unittest.TestCase):
 
     def listing(self, **kwargs):
         call = mock.MagicMock()
-        if kwargs['filter'].startswith('thread.name'):
+        if 'createTime >' in kwargs['filter'] and kwargs.get('orderBy') == 'createTime DESC':
+            self.gap_queries.append(kwargs['filter'])
+            call.execute.return_value = {'messages': list(reversed(self.gaps))}
+        elif kwargs['filter'].startswith('thread.name'):
             thread = kwargs['filter'].split(' ')[2]
             call.execute.return_value = {'messages': self.threads.get(thread, [])}
         else:
@@ -1082,6 +1087,29 @@ class GatedSpaceTest(SpaceCase):
         self.assertEqual(self.poll([], 5), [])
         self.jev.ask.assert_called_once()
         self.assertEqual(self.reactions(), [])
+
+    def test_hours_later_the_bot_gets_what_it_missed_and_jev_knows_it_took_part(self):
+        # 10:00 Andy, 10:02 Genduk, 10:03 Budi (held); then 13:00-13:05 among others.
+        self.poll([self.m('a1', OTHER, '@genduk ada ide?', 0)], 1)
+        self.poll([self.own('g1', 'coba pakai cache', 120)], 121)
+        held = self.m('b1', OTHER, 'cache yang mana Nduk?', 180)
+        self.poll([held], 181)
+        self.poll([], 186)
+        later = [self.m(f'c{i}', OTHER, f'obrolan {i}', 10800 + 60 * i) for i in range(5)]
+        for i, msg in enumerate(later):
+            self.poll([msg], 10801 + 60 * i)
+            self.poll([], 10806 + 60 * i)
+        self.gaps = [held] + later[:4]
+        self.scored(could_help=0.95)
+        self.poll([self.m('c5', OTHER, 'ada yang tau?', 11100)], 11100)
+        out = self.poll([], 11140)
+        earlier = out[0]['content'].split('New:')[0]
+        self.assertIn('cache yang mana Nduk?', earlier)   # fetched: the buffer no longer reaches 10:03
+        self.assertIn('obrolan 0', earlier)
+        self.assertNotIn('@genduk ada ide?', earlier)     # seen at 10:00 already
+        self.assertEqual(self.gap_queries, [f'createTime > "{ts(120)}" AND createTime < "{ts(11100)}"'])
+        texts = [m['text'] for m in self.jev.ask.call_args.args[0]['messages']]
+        self.assertEqual(texts[:2], ['coba pakai cache', 'cache yang mana Nduk?'])
 
     def test_list_watched_names_the_gate(self):
         self.ch.active = True
