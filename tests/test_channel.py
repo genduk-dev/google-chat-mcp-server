@@ -1010,6 +1010,17 @@ class GatedSpaceTest(SpaceCase):
             self.poll([], sec + 5)
         self.assertEqual(self.reactions(), ['m1'])
 
+    def test_reactions_off_means_none_at_all_in_that_space(self):
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True, 'reactions': False}})
+        self.scored(addressed=0.96, wants_reply=0.2, reaction='pray')
+        self.poll([self.m('m1', OTHER, 'makasih Nduk', 0)], 1)
+        self.assertEqual(self.poll([], 5), [])            # thanks to the bot: no emoji either
+        self.assertEqual(len(self.poll([self.m('m2', OTHER, '@genduk cek dong', 10)], 11)), 1)
+        self.scored(addressed=0.9, wants_reply=0.9)
+        self.poll([self.m('m3', OTHER, 'Nduk, satu lagi', 20)], 21)
+        self.assertEqual(self.poll([], 25)[0]['meta']['gate'], 'reply')
+        self.assertEqual(self.reactions(), [])            # no 👀 for a mention or a reply
+
     def test_chiming_in_stops_once_the_bot_has_its_share_of_the_talk(self):
         self.scored(natural_to_join=0.95)
         chatter = [self.m(f'c{i}', OTHER, 'seru', i) for i in range(6)]
@@ -1117,7 +1128,7 @@ class GatedSpaceTest(SpaceCase):
         from gate import Jev
         self.ch.gate.jev = Jev({'OPENROUTER_API_KEY': 'k', 'CHANNEL_GATE_MODEL': 'typesafe/jev-9'})
         text = channel.gate_instructions(self.ch.gate)
-        for fact in ('typesafe/jev-9', 'through openrouter.ai', 'up to 12 before them', 'cut to 400 characters',
+        for fact in ('typesafe/jev-9', 'through openrouter.ai', 'judged again', 'turn reactions off', 'up to 12 before them', 'cut to 400 characters',
                      'more than 30% of the last 10 messages', 'pauses for 4 seconds', 'for 10 minutes'):
             self.assertIn(fact, text)
         self.assertNotIn('k', text.split('through')[1][:20])   # never the key

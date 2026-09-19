@@ -146,14 +146,17 @@ Each space in the channel state file may also set, by hand:
   threshold.
 - `max_share`: the bot joins in unasked only while it wrote at most this
   share of the last ten messages (default 0.3).
-- `reactions`: `false` stops emoji on messages that were not for the bot.
+- `reactions`: `false` makes the channel add no reaction in that space: no
+  gate emoji and no 👀 acknowledgement.
 
 Know what it sends: the new messages and up to twelve before them, cut to 400
 characters each, with sender names, plus the bot's description and the
 space's norms. Every decision goes to `gate_log.jsonl` beside the state, with
 that text, for `CHANNEL_GATE_LOG_DAYS`. An edit of a message the gate held
-back is judged again, so a question edited to name the bot can still reach it. Reactions, the gate's and the 👀 acknowledgement, are made with
-the signed-in user's own account, so in a space they show as that person.
+back is judged again, so a question edited to name the bot can still reach it.
+Reactions, the gate's and the 👀 acknowledgement, are made with the signed-in
+user's own account, since Chat takes them from a user only, so in a space
+they show as that person. Turn them off where that would mislead.
 
 **Always start that config with the flag, and on one machine only.**
 

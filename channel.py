@@ -113,11 +113,15 @@ def gate_instructions(gate: Gate) -> str:
         f'messages, up to {GATE_HISTORY} before them and your own last message in that conversation (each cut to {TEXT_CHARS} characters, with sender names, how '
         'long ago each was sent, and whether it mentions you or someone else), your one-line description, and the '
         f"space's own description if the operator gave one, to TypeSafe's Jev model ({gate.jev.model}) through {host}. "
+        'A message of emoji shortcodes or an attachment alone is held without asking Jev, and an edit of a '
+        'message it held back is judged again. '
         'Jev is a decision model: it writes no text, and answers typed questions with probabilities (is this addressed '
         'to you, does the chat expect your answer, is there an open problem you could help with, how invited would '
         'you feel to join, is it personal, which emoji fits). The server turns those into reply, react, join or '
         f'hold with fixed thresholds. It stops you joining in unasked while you wrote more than '
         f'{int(GATE_MAX_SHARE * 100)}% of the last {GATE_SHARE_WINDOW} messages, unless the space sets its own share. '
+        'The operator may also turn reactions off in a space, since they show as the account the channel signs in '
+        'with, and then it adds none, the acknowledgement included. '
         'A message that mentions or quotes you reaches you without Jev judging it, though it can be part of what Jev reads later. You yourself are a Claude model in a Claude Code session, '
         'and your replies are written by you, not by Jev. If you are asked about something this does not cover, such '
         'as the exact thresholds, say you do not know.'
@@ -173,8 +177,10 @@ GATE_RETRY = datetime.timedelta(seconds=30)
 # person who keeps from dominating a group, instead of by a clock: a fixed
 # cooldown left it silent through a lively chat it had joined once. A space's
 # config may set 'max_share' of the last GATE_SHARE_WINDOW messages. It may also
-# set 'reactions' to false, where an emoji on every "ok" would be noise, and
-# 'norms', the operator's description of how the space works, which Jev reads.
+# set 'reactions' to false, and 'norms', the operator's description of how the
+# space works, which Jev reads. Reactions can only be made as the signed-in
+# user, so in a space with other people every emoji, the 👀 acknowledgement
+# included, shows as that person. 'reactions': false makes none there.
 GATE_SHARE_WINDOW = 10
 GATE_MAX_SHARE = 0.3
 # An unasked reaction skips a message when one of this many before it got one.
@@ -874,6 +880,8 @@ class Channel:
                   now: datetime.datetime, batch: List[Tuple[Dict, Flags]], acknowledged: List[Dict],
                   presence: bool = False, gate: str = '', gate_reason: str = '') -> Dict:
         """The notification for a batch, with the context it follows from. Marks all of it seen."""
+        if config.get('reactions') is False:
+            acknowledged = []
         if config.get('mention_only') or self.gate:
             state.deliveries.append(now)
         earlier, left_out = self._context(chat, config, state, batch)
@@ -946,10 +954,11 @@ class Channel:
                 action = HOLD
             elif quiet.total_seconds() < policy.interject_quiet:
                 return []
-        elif action == REACT and decision.scores['addressed'] < policy.reply:
+        elif action == REACT:
             recent = [m['name'] for m in state.buffer if m['name'] not in {p[0]['name'] for p in state.pending}]
-            if config.get('reactions') is False or any(
-                    state.silent.get(name) == 'reacted' for name in recent[-GATE_REACTION_SPACING:]):
+            unasked = decision.scores['addressed'] < policy.reply
+            if config.get('reactions') is False or (unasked and any(
+                    state.silent.get(name) == 'reacted' for name in recent[-GATE_REACTION_SPACING:])):
                 action = HOLD
         batch = [(m, f) for m, f, _ in state.pending]
         state.pending, state.judged = [], None
