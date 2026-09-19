@@ -964,12 +964,12 @@ class GatedSpaceTest(SpaceCase):
                          ('decision', 'reply', [f'{SPACE}/messages/m1', f'{SPACE}/messages/m2']))
 
     def test_thanks_gets_a_reaction_and_no_turn(self):
-        self.scored(addressed=0.96, wants_reply=0.2)
+        self.scored(addressed=0.96, wants_reply=0.2, reaction='pray')
         self.poll([self.m('m1', OTHER, 'mantap makasih', 0)], 1)
         self.assertEqual(self.poll([], 5), [])
         call = self.chat.spaces().messages().reactions().create.call_args
         self.assertEqual((call.kwargs['parent'], call.kwargs['body']),
-                         (f'{SPACE}/messages/m1', {'emoji': {'unicode': channel.REACT_EMOJI}}))
+                         (f'{SPACE}/messages/m1', {'emoji': {'unicode': '🙏'}}))
 
     def test_chiming_in_waits_for_a_longer_pause_and_starts_over_when_someone_speaks(self):
         self.scored(could_help=0.95, wants_reply=0.5)
@@ -981,8 +981,24 @@ class GatedSpaceTest(SpaceCase):
         self.assertEqual(self.jev.ask.call_count, 2)
         self.assertEqual(self.poll([], 50), [])
         out = self.poll([], 56)
-        self.assertEqual(out[0]['meta']['gate'], 'interject')
+        self.assertEqual((out[0]['meta']['gate'], out[0]['meta']['gate_reason']), ('interject', 'help'))
         self.assertEqual(self.reactions(), [])            # nobody asked, so nothing to acknowledge
+
+    def test_banter_is_joined_with_its_reason(self):
+        self.scored(natural_to_join=0.9, reaction='laugh')
+        self.poll([self.m('m1', OTHER, 'wkwk deploy jumat sore', 0)], 1)
+        out = self.poll([], 31)
+        self.assertEqual((out[0]['meta']['gate'], out[0]['meta']['gate_reason']), ('interject', 'join'))
+
+    def test_a_joke_gets_a_laugh_and_joining_in_unasked_shares_one_cooldown(self):
+        self.scored(natural_to_join=0.5, reaction='laugh', reaction_p=0.9)
+        self.poll([self.m('m1', OTHER, 'wkwk', 0)], 1)
+        self.assertEqual(self.poll([], 5), [])
+        self.assertEqual(self.reactions(), ['m1'])
+        self.scored(could_help=0.95)
+        self.poll([self.m('m2', OTHER, 'build lambat kenapa ya', 60)], 60)
+        self.assertEqual(self.poll([], 95), [])           # within the cooldown the laugh started
+        self.assertEqual(self.ch.states[SPACE].silent[f'{SPACE}/messages/m2'], 'stayed_silent')
 
     def test_chiming_in_again_waits_for_the_cooldown(self):
         self.scored(could_help=0.95)
@@ -1012,10 +1028,10 @@ class GatedSpaceTest(SpaceCase):
         self.poll([self.m('m3', OTHER, 'terus staging?', 30)], 30)
         self.poll([], 35)
         messages = self.jev.ask.call_args.args[0]['messages']
-        self.assertEqual([(m['sender'], m.get('assistant_action'), m.get('from_assistant'), m.get('new')) for m in messages],
+        self.assertEqual([(m['sender'], m.get('agent_action'), m.get('from_agent'), m.get('new')) for m in messages],
                          [('Budi', 'stayed_silent', None, None), ('Budi', None, None, None),
                           ('Genduk', None, True, None), ('Budi', None, None, True)])
-        self.assertTrue(messages[1]['mentions_assistant'])
+        self.assertTrue(messages[1]['mentions_agent'])
         self.assertEqual(messages[-1]['ago_seconds'], 5)
 
     def test_leaving_holds_back_all_but_mentions_for_ten_minutes(self):

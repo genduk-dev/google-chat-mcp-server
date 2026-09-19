@@ -19,8 +19,8 @@ space for that lives in the poller's memory only, so a restart starts idle.
 With CHANNEL_GATE=jev no space has presence, and mention_only means nothing.
 In every watched space a mention or a quote reply still arrives at once, and
 every other batch goes to the gate
-(gate.py), which asks Jev whether to deliver it, react to it, chime in on it,
-or hold it back. What it held back reaches the session later as context.
+(gate.py), which asks Jev whether to deliver it, react to it with an emoji,
+join in (to help, or just to talk), or hold it back. What it held back reaches the session later as context.
 """
 import contextlib
 import copy
@@ -94,9 +94,11 @@ GATE_INSTRUCTIONS = (
     ' This channel runs a classifier gate in every watched space, in place of mention_only and presence: a mention or '
     'a quote reply to you still arrives at once, and any other message arrives only when the gate '
     'lets it through. Such a delivery carries gate="reply" when the gate judged that the chat expects '
-    'your answer, or gate="interject" when nobody asked you but there is an open question you may be '
-    'able to help with. With gate="interject", speak only when you have a concrete contribution, in '
-    'one short message, and stay silent when in doubt. What the gate held back reaches you later '
+    'your answer, or gate="interject" when nobody asked you but joining in would be natural: '
+    'gate_reason="help" when there is an open question you may be able to help with, '
+    'gate_reason="join" when the talk itself invites a remark or a joke. Either way say one short '
+    'thing that fits, and stay silent when nothing does. The gate also reacts with an emoji for you '
+    'where that is all a person would do. What the gate held back reaches you later '
     'under "Earlier". leave_conversation holds back everything but mentions and quote replies there '
     'for 10 minutes.'
 )
@@ -143,8 +145,6 @@ CONTEXT_CHARS = 4000
 ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
 ATTACHMENT_TTL = datetime.timedelta(days=7)
 ACK_EMOJI = '👀'
-# The gate's answer to thanks or an ok addressed to the bot, instead of a turn.
-REACT_EMOJI = '👍'
 # With the gate: the recent messages Jev reads before the batch it judges, and
 # how long it waits after Jev failed before asking again.
 GATE_HISTORY = 12
@@ -266,11 +266,12 @@ class SpaceState:
     deliveries: List[datetime.datetime] = dataclasses.field(default_factory=list)
     # With the gate: the decision on the pending batch and the newest message it
     # covered, so a batch is judged once until it grows; when to ask again after
-    # Jev failed; when the bot last chimed in; and what it did about messages it
-    # did not deliver (message name -> 'stayed_silent' or 'reacted').
+    # Jev failed; when the bot last joined in unasked (chimed in, or reacted to
+    # what was not for it); and what it did about messages it did not deliver
+    # (message name -> 'stayed_silent' or 'reacted').
     judged: Optional[Tuple[str, Decision]] = None
     gate_retry_at: Optional[datetime.datetime] = None
-    last_interject: Optional[datetime.datetime] = None
+    last_joined: Optional[datetime.datetime] = None
     silent: Dict[str, str] = dataclasses.field(default_factory=dict)
 
     def is_active(self, at: datetime.datetime) -> bool:
@@ -343,7 +344,7 @@ def permission_prompt(params: Dict) -> str:
 
 def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool = False,
                     space_title: str = '', flags: Optional[Flags] = None, presence: bool = False,
-                    content: Optional[str] = None, gate: str = '') -> Dict:
+                    content: Optional[str] = None, gate: str = '', gate_reason: str = '') -> Dict:
     """Build notification params. Meta keys must be identifiers or Claude Code drops them.
 
     content defaults to the message's own text with its attachments' names.
@@ -368,6 +369,8 @@ def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool =
         meta['presence'] = 'active'
     if gate:
         meta['gate'] = gate
+    if gate_reason:
+        meta['gate_reason'] = gate_reason
     if content is None:
         content = _body(msg)
         names = [a.get('contentName') for a in msg.get('attachment', []) if a.get('contentName')]
@@ -796,7 +799,7 @@ class Channel:
 
     def _delivery(self, chat, creds, space_name: str, config: Dict, state: SpaceState, operator: str,
                   now: datetime.datetime, batch: List[Tuple[Dict, Flags]], acknowledged: List[Dict],
-                  presence: bool = False, gate: str = '') -> Dict:
+                  presence: bool = False, gate: str = '', gate_reason: str = '') -> Dict:
         """The notification for a batch, with the context it follows from. Marks all of it seen."""
         if config.get('mention_only') or self.gate:
             state.deliveries.append(now)
@@ -807,7 +810,7 @@ class Channel:
         notification = to_notification(
             last, space_name, get_user_display_name(last.get('sender', {}), creds),
             space_title=self._space_title(space_name, creds), flags=last_flags, presence=presence,
-            content=self._content(creds, operator, batch, earlier, left_out), gate=gate)
+            content=self._content(creds, operator, batch, earlier, left_out), gate=gate, gate_reason=gate_reason)
         for msg in [m for m, _ in batch] + earlier:
             state.seen[msg['name']] = now
         return notification
@@ -818,8 +821,10 @@ class Channel:
         grows, then delivered, reacted to, chimed in on, or held back.
 
         Chiming in waits longer than a reply, so a person can answer first: a new
-        message grows the batch and it is judged again. A failed call leaves the
-        batch waiting and is retried after GATE_RETRY.
+        message grows the batch and it is judged again. Joining in unasked, by
+        chiming in or by reacting to what was not for the bot, happens at most once
+        per cooldown. A failed call leaves the batch waiting and is retried after
+        GATE_RETRY.
         """
         if not state.pending:
             return []
@@ -836,22 +841,25 @@ class Channel:
                 return []
             state.gate_retry_at = None
             state.judged = (newest, decision)
-        action = state.judged[1].action
-        if action == INTERJECT:
-            policy = self.gate.policy
-            if state.last_interject and (now - state.last_interject).total_seconds() < policy.interject_cooldown:
+        decision = state.judged[1]
+        action = decision.action
+        policy = self.gate.policy
+        unasked = action == INTERJECT or (action == REACT and decision.scores['addressed'] < policy.reply)
+        if unasked:
+            if state.last_joined and (now - state.last_joined).total_seconds() < policy.interject_cooldown:
                 action = HOLD
-            elif quiet.total_seconds() < policy.interject_quiet:
+            elif action == INTERJECT and quiet.total_seconds() < policy.interject_quiet:
                 return []
+            else:
+                state.last_joined = now
         batch = [(m, f) for m, f, _ in state.pending]
         state.pending, state.judged = [], None
         if action in (REPLY, INTERJECT):
-            if action == INTERJECT:
-                state.last_interject = now
             return [self._delivery(chat, creds, space_name, config, state, operator, now, batch,
-                                   acknowledged=[batch[-1][0]] if action == REPLY else [], gate=action)]
+                                   acknowledged=[batch[-1][0]] if action == REPLY else [], gate=action,
+                                   gate_reason=decision.reason if action == INTERJECT else '')]
         if action == REACT:
-            self._acknowledge(chat, batch[-1][0], REACT_EMOJI)
+            self._acknowledge(chat, batch[-1][0], decision.emoji)
         for msg, _ in batch:
             state.silent[msg['name']] = 'reacted' if action == REACT else 'stayed_silent'
         return []
@@ -867,6 +875,7 @@ class Channel:
             self._gate_log({'event': 'error', 'space': space_name, 'error': str(e)})
             return None
         self._gate_log({'event': 'decision', 'space': space_name, 'action': decision.action,
+                        'reason': decision.reason, 'emoji': decision.emoji,
                         'scores': decision.scores, 'ms': int((self._clock() - started).total_seconds() * 1000),
                         'messages': [m.state() for m in messages],
                         'names': [m['name'] for m, _, _ in state.pending]})
@@ -889,11 +898,11 @@ class Channel:
             return GateMessage(
                 sender=self.gate.policy.name if own else get_user_display_name(msg.get('sender', {}), creds),
                 text=_body(msg), ago_seconds=int((now - _parse_time(msg['createTime'])).total_seconds()),
-                thread=_thread(msg).split('/threads/')[-1], from_assistant=own,
+                thread=_thread(msg).split('/threads/')[-1], from_agent=own,
                 from_bot=msg.get('sender', {}).get('type') == 'BOT',
-                mentions_assistant=flags.mentioned if flags else (not own and mentions_bot(msg.get('text') or '')),
-                replies_to_assistant=flags.replying_to_bot if flags else quoted in state.bot_messages,
-                new=flags is not None, assistant_action=state.silent.get(msg['name'], ''))
+                mentions_agent=flags.mentioned if flags else (not own and mentions_bot(msg.get('text') or '')),
+                replies_to_agent=flags.replying_to_bot if flags else quoted in state.bot_messages,
+                new=flags is not None, agent_action=state.silent.get(msg['name'], ''))
         return ([gate_message(m, None) for m in history]
                 + [gate_message(m, f) for m, f, _ in state.pending])
 
