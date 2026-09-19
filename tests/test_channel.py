@@ -531,7 +531,20 @@ class PresenceTest(SpaceCase):
         self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {'spaceEvents': [
             PollTest.edit_event(m, m['lastUpdateTime']) for m in (unseen, edited)]}
         out = self.poll([], 102)
-        self.assertEqual([(n['content'], n['meta']['edited']) for n in out], [('@genduk deploy prod', 'true')])
+        self.assertEqual([(n['content'], n['meta']['edited']) for n in out],
+                         [('Before the edit:\n@genduk deploy staging\n\nAfter:\n@genduk deploy prod', 'true')])
+
+    def test_an_edit_that_only_changes_spacing_or_case_is_dropped(self):
+        self.poll([self.m('m1', OTHER, '@genduk deploy  staging', 0)], 1)
+        edited = self.m('m1', OTHER, '@Genduk Deploy staging ', 0, lastUpdateTime=ts(20))
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {'spaceEvents': [
+            PollTest.edit_event(edited, edited['lastUpdateTime'])]}
+        self.assertEqual(self.poll([], 21), [])
+        typo = self.m('m1', OTHER, '@genduk deploy stagign', 0, lastUpdateTime=ts(30))
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {'spaceEvents': [
+            PollTest.edit_event(typo, typo['lastUpdateTime'])]}
+        out = self.poll([], 31)
+        self.assertTrue(out[0]['content'].startswith('Before the edit:\n@Genduk Deploy staging'))
 
 
 class OpenSpaceTest(SpaceCase):

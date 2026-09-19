@@ -77,7 +77,9 @@ INSTRUCTIONS = (
     'and wait for the reply to arrive as a channel message; do not use AskUserQuestion, which only '
     'the terminal can answer. Tool permission prompts are relayed to that thread automatically, and '
     'only the operator can answer them. A message that was edited arrives again with edited="true" '
-    'and the same message_name; treat it as a correction of the earlier version.'
+    'and the same message_name, with the version you saw under "Before the edit" when you saw one. '
+    'Treat it as a correction of that version, and reply only when the edit changes what was asked '
+    'or what it means, or adds a request; a fixed typo needs nothing.'
 )
 
 # A takeover resumes from saved cursors only if the previous poller saved them
@@ -180,6 +182,10 @@ def _utc(ts: str) -> str:
 
 def _thread(msg: Dict) -> str:
     return msg.get('thread', {}).get('name', '')
+
+
+def _same_words(a: str, b: str) -> bool:
+    return a.casefold().split() == b.casefold().split()
 
 
 def _body(msg: Dict) -> str:
@@ -903,14 +909,24 @@ class Channel:
                         mention_only = bool(config.get('mention_only'))
                         if mention_only and not (flags.addressed or state.is_active(at) or msg['name'] in state.seen):
                             continue
+                        # The version the session saw, so it can tell a typo fix from a
+                        # changed request. Only the buffer has it; a fetch would return the edit.
+                        before = (next((m for m in state.buffer if m['name'] == msg['name']), None)
+                                  if msg['name'] in state.seen else None)
+                        if before and _same_words(_body(before), _body(msg)):
+                            state.remember(msg)
+                            continue  # spacing or case only: nothing to reconsider
                         if mention_only and flags.addressed:
                             state.address(at)
                         state.remember(msg)
                         state.seen[msg['name']] = now
                         sender_name = get_user_display_name(msg.get('sender', {}), creds)
+                        content = None
+                        if before:
+                            content = f"Before the edit:\n{_body(before)}\n\nAfter:\n{_body(msg)}"
                         out.append(to_notification(msg, space_name, sender_name, edited=True,
                                                    space_title=self._space_title(space_name, creds),
-                                                   flags=flags, presence=mention_only))
+                                                   flags=flags, presence=mention_only, content=content))
                 page_token = response.get('nextPageToken')
                 if not page_token:
                     break
