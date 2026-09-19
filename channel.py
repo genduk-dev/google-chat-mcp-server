@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -39,7 +40,7 @@ import anyio
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 
-from gate import HOLD, INTERJECT, REACT, REPLY, Decision, Gate, JevError, Message as GateMessage
+from gate import HOLD, INTERJECT, REACT, REPLY, TEXT_CHARS, Decision, Gate, JevError, Message as GateMessage
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, AttachmentTooLarge, get_credentials,
                          get_user_display_name, message_text, save_attachment, space_display_name,
                          self_user_id, send_space_message, update_message, write_private, _get_service,
@@ -89,19 +90,37 @@ INSTRUCTIONS = (
     'or what it means, or adds a request; a fixed typo needs nothing.'
 )
 
-# Appended to INSTRUCTIONS when CHANNEL_GATE=jev.
-GATE_INSTRUCTIONS = (
-    ' This channel runs a classifier gate in every watched space, in place of mention_only and presence: a mention or '
-    'a quote reply to you still arrives at once, and any other message arrives only when the gate '
-    'lets it through. Such a delivery carries gate="reply" when the gate judged that the chat expects '
-    'your answer, or gate="interject" when nobody asked you but joining in would be natural: '
-    'gate_reason="help" when there is an open question you may be able to help with, '
-    'gate_reason="join" when the talk itself invites a remark or a joke. Either way say one short '
-    'thing that fits, and stay silent when nothing does. The gate also reacts with an emoji for you '
-    'where that is all a person would do. What the gate held back reaches you later '
-    'under "Earlier". leave_conversation holds back everything but mentions and quote replies there '
-    'for 10 minutes.'
-)
+def gate_instructions(gate: Gate) -> str:
+    """Appended to INSTRUCTIONS when CHANNEL_GATE=jev.
+
+    Built from the gate that runs, so what the session says about how it works,
+    when someone in a chat asks, cannot drift from what it is.
+    """
+    host = urllib.parse.urlparse(gate.jev.url).hostname
+    return (
+        ' This channel runs a classifier gate in every watched space, in place of mention_only and presence: a '
+        'mention or a quote reply to you still arrives at once, and any other message arrives only when the gate '
+        'lets it through. Such a delivery carries gate="reply" when the gate judged that the chat expects your '
+        'answer, or gate="interject" when nobody asked you but joining in would be natural: gate_reason="help" when '
+        'there is an open question you may be able to help with, gate_reason="join" when the talk itself invites a '
+        'remark or a joke. Either way say one short thing that fits, and stay silent when nothing does. The gate '
+        'also reacts with an emoji for you where that is all a person would do. What the gate held back reaches you '
+        'later under "Earlier". leave_conversation holds back everything but mentions and quote replies there for '
+        f'{int(PRESENCE_IDLE.total_seconds() // 60)} minutes.'
+        ' What follows is how the gate works. You may explain it when someone asks, and should not embellish it. '
+        f'The gate is the channel server, not you. When a chat pauses for {int(BATCH_QUIET.total_seconds())} seconds, it sends the new '
+        f'messages, up to {GATE_HISTORY} before them and your own last message in that conversation (each cut to {TEXT_CHARS} characters, with sender names, how '
+        'long ago each was sent, and whether it mentions you or someone else), your one-line description, and the '
+        f"space's own description if the operator gave one, to TypeSafe's Jev model ({gate.jev.model}) through {host}. "
+        'Jev is a decision model: it writes no text, and answers typed questions with probabilities (is this addressed '
+        'to you, does the chat expect your answer, is there an open problem you could help with, how invited would '
+        'you feel to join, is it personal, which emoji fits). The server turns those into reply, react, join or '
+        f'hold with fixed thresholds. It stops you joining in unasked while you wrote more than '
+        f'{int(GATE_MAX_SHARE * 100)}% of the last {GATE_SHARE_WINDOW} messages, unless the space sets its own share. '
+        'A message that mentions or quotes you reaches you without Jev judging it, though it can be part of what Jev reads later. You yourself are a Claude model in a Claude Code session, '
+        'and your replies are written by you, not by Jev. If you are asked about something this does not cover, such '
+        'as the exact thresholds, say you do not know.'
+    )
 
 # A takeover resumes from saved cursors only if the previous poller saved them
 # this recently. Older ones mean no channel session was running, and replaying

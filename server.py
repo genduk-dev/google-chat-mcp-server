@@ -651,7 +651,7 @@ def run_channel(args) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
     from mcp.shared.message import SessionMessage
-    from channel import Channel, ChannelStore, GATE_INSTRUCTIONS, INSTRUCTIONS, PERMISSION_REQUEST_METHOD
+    from channel import Channel, ChannelStore, INSTRUCTIONS, PERMISSION_REQUEST_METHOD, gate_instructions
     from gate import from_env as gate_from_env
     from google_chat import BOT_NAME
 
@@ -729,7 +729,7 @@ def run_channel(args) -> None:
         app.tool(fn, output_schema=None, run_in_thread=False)
 
     server = app._mcp_server
-    server.instructions = INSTRUCTIONS + (GATE_INSTRUCTIONS if gate else '')
+    server.instructions = INSTRUCTIONS + (gate_instructions(gate) if gate else '')
     # Permission relay is safe to offer: only the operator can answer.
     options = server.create_initialization_options(
         experimental_capabilities={'claude/channel': {}, 'claude/channel/permission': {}})

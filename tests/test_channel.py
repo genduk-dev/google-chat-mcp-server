@@ -1111,6 +1111,15 @@ class GatedSpaceTest(SpaceCase):
         texts = [m['text'] for m in self.jev.ask.call_args.args[0]['messages']]
         self.assertEqual(texts[:2], ['coba pakai cache', 'cache yang mana Nduk?'])
 
+    def test_the_instructions_describe_the_gate_that_runs(self):
+        from gate import Jev
+        self.ch.gate.jev = Jev({'OPENROUTER_API_KEY': 'k', 'CHANNEL_GATE_MODEL': 'typesafe/jev-9'})
+        text = channel.gate_instructions(self.ch.gate)
+        for fact in ('typesafe/jev-9', 'through openrouter.ai', 'up to 12 before them', 'cut to 400 characters',
+                     'more than 30% of the last 10 messages', 'pauses for 4 seconds', 'for 10 minutes'):
+            self.assertIn(fact, text)
+        self.assertNotIn('k', text.split('through')[1][:20])   # never the key
+
     def test_list_watched_names_the_gate(self):
         self.ch.active = True
         self.assertEqual(self.ch.list_watched()['gate'], 'jev')
