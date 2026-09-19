@@ -184,7 +184,8 @@ class PollTest(unittest.TestCase):
             message('m1', text='just chatting', create_time='2026-09-18T07:00:01Z'),
             message('m2', text='@Genduk summarize', create_time='2026-09-18T07:00:02Z'),
         ])
-        out = ch.poll_once()
+        with mock.patch.object(ch, '_clock', return_value=T0):   # read the same day, so no date
+            out = ch.poll_once()
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]['content'],
                          'Earlier, not sent to you before:\n'
@@ -463,7 +464,7 @@ class PresenceTest(SpaceCase):
         quote = self.m('m1', OTHER, 'about this', 0, quotedMessageMetadata={'name': f'{SPACE}/messages/b0'})
         out = self.poll([quote], 1)
         self.assertEqual(out[0]['meta']['replying_to_bot'], 'true')
-        self.assertIn('[you, 07:00Z', out[0]['content'])   # the quoted message is its context
+        self.assertIn('[you, Sep 17 07:00Z', out[0]['content'])   # the quoted message is its context
         self.chat.spaces().messages().get.assert_called_once_with(name=f'{SPACE}/messages/b0')
 
     def test_another_bot_neither_starts_nor_keeps_presence(self):
@@ -1119,6 +1120,13 @@ class GatedSpaceTest(SpaceCase):
                      'more than 30% of the last 10 messages', 'pauses for 4 seconds', 'for 10 minutes'):
             self.assertIn(fact, text)
         self.assertNotIn('k', text.split('through')[1][:20])   # never the key
+
+    def test_times_are_written_in_the_space_s_zone_with_the_day_when_not_today(self):
+        with mock.patch.dict(os.environ, {'CHANNEL_TIMEZONE': 'Asia/Jakarta'}):
+            ch = Channel(self.store, 5)
+        self.assertEqual(channel._local(ts(0), ch.zone, at(60)), '14:00 WIB')
+        self.assertEqual(channel._local(ts(-86400), ch.zone, at(60)), 'Sep 17 14:00 WIB')
+        self.assertEqual(channel._local(ts(0), channel.datetime.timezone.utc, at(60)), '07:00Z')
 
     def test_list_watched_names_the_gate(self):
         self.ch.active = True

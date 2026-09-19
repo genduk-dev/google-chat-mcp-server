@@ -33,6 +33,7 @@ import os
 import re
 import urllib.parse
 import uuid
+import zoneinfo
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -236,9 +237,16 @@ def parse_verdict(msg: Dict, operator: str) -> Optional[Tuple[str, str]]:
     return m.group(2).lower(), 'allow' if m.group(1).lower().startswith('y') else 'deny'
 
 
-def _utc(ts: str) -> str:
-    """'2026-09-18T09:24:19.953311Z' -> '09:24Z'."""
-    return _parse_time(ts).strftime('%H:%MZ')
+def _local(ts: str, zone: datetime.tzinfo, now: datetime.datetime) -> str:
+    """A message's time as people in the space read it, with the day when it is not today.
+
+    '2026-09-18T09:24:19Z' -> '09:24Z' in UTC, '16:24 WIB' in Asia/Jakarta, and
+    'Sep 17 16:24 WIB' when read on the 18th.
+    """
+    at = _parse_time(ts).astimezone(zone)
+    label = 'Z' if zone == datetime.timezone.utc else f" {at.strftime('%Z')}"
+    day = '' if at.date() == now.astimezone(zone).date() else at.strftime('%b %d ')
+    return f"{day}{at.strftime('%H:%M')}{label}"
 
 
 def _thread(msg: Dict) -> str:
@@ -436,6 +444,10 @@ class Channel:
         self.poll_seconds = poll_seconds
         # None: mention_only spaces use presence. A Gate: they use the gate.
         self.gate = gate
+        # The zone a delivery's times are written in, for the people in the space.
+        # Meta keeps ISO UTC. A name zoneinfo does not know fails the start.
+        zone = os.environ.get('CHANNEL_TIMEZONE', '')
+        self.zone = zoneinfo.ZoneInfo(zone) if zone else datetime.timezone.utc
         # Every gate decision and error, one JSON object a line, to tune the gate by.
         self.gate_log_path = store.path.with_name('gate_log.jsonl')
         self.lease_path = store.path.with_name('channel.lease')
@@ -1080,7 +1092,8 @@ class Channel:
                     tags.append('replies to you')
                 if tags:
                     who += f" ({', '.join(tags)})"
-            return f"[{who}, {_utc(msg['createTime'])}, {_thread(msg)}]\n{_body(msg)}{attachments(msg, save)}"
+            when = _local(msg['createTime'], self.zone, self._clock())
+            return f"[{who}, {when}, {_thread(msg)}]\n{_body(msg)}{attachments(msg, save)}"
 
         parts = []
         if earlier:
