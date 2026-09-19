@@ -67,7 +67,10 @@ user, answers a permission prompt.
 ### Presence lives in the poller's memory
 
 Which spaces the bot is present in, what the session has seen, and the queued
-batch are in memory, so a restart or a takeover starts idle. What a tool
+batch are in memory, so a restart or a takeover starts idle. So are the gate's
+pending decision and, per conversation, how far the session has read, which
+is why a delivery to a fresh session fetches the last day from Chat instead
+of trusting the buffer. What a tool
 changes (leave, mute) goes through the state file instead, because the tool
 may run in a session that is not polling.
 
