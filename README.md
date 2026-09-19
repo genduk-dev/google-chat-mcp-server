@@ -148,7 +148,8 @@ Each space in the channel state file may also set, by hand:
   share of the last ten messages (default 0.3).
 - `reactions`: `false` makes the channel add no reaction in that space.
 
-Know what it sends: the new messages, up to twelve before them and the bot's
+Know what it sends: the new messages, up to twelve before them (read from
+Chat when the poller has not seen them, as after a restart) and the bot's
 own last message in that conversation, cut to 400 characters each, with
 sender names, plus the bot's description and the space's norms. Every decision goes to `gate_log.jsonl` beside the state, with
 that text, for `CHANNEL_GATE_LOG_DAYS`. An edit of a message the gate held

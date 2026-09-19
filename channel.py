@@ -332,6 +332,10 @@ class SpaceState:
     # there with the first one after it, so the gate knows the bot took part.
     seen_upto: Dict[str, str] = dataclasses.field(default_factory=dict)
     last_spoke: Dict[str, List[Dict]] = dataclasses.field(default_factory=dict)
+    # With the gate: per conversation, what Chat held before this poller buffered
+    # any of it, fetched once (when, messages), so after a restart Jev still reads
+    # the conversation a message continues.
+    gate_history: Dict[str, Tuple[datetime.datetime, List[Dict]]] = dataclasses.field(default_factory=dict)
 
     def is_active(self, at: datetime.datetime) -> bool:
         return (self.active_since is not None and at - self.last_addressed < PRESENCE_IDLE
@@ -364,6 +368,8 @@ class SpaceState:
         self.silent = {name: action for name, action in self.silent.items() if name in kept}
         self.last_spoke = {scope: msgs for scope, msgs in self.last_spoke.items()
                            if now - _parse_time(msgs[0]['createTime']) < MEMORY_WINDOW}
+        self.gate_history = {scope: entry for scope, entry in self.gate_history.items()
+                             if now - entry[0] < MEMORY_WINDOW}
         self.deliveries = [t for t in self.deliveries if now - t < datetime.timedelta(hours=1)]
 
 
@@ -943,7 +949,7 @@ class Channel:
         if not state.judged or state.judged[0] != newest:
             if state.gate_retry_at and now < state.gate_retry_at:
                 return []
-            decision = self._judge(creds, space_name, config, state, now)
+            decision = self._judge(chat, creds, space_name, config, state, now)
             if not decision:
                 state.gate_retry_at = now + GATE_RETRY
                 return []
@@ -982,10 +988,10 @@ class Channel:
         own = sum(1 for m in recent if is_own(m))
         return own > config.get('max_share', GATE_MAX_SHARE) * GATE_SHARE_WINDOW
 
-    def _judge(self, creds, space_name: str, config: Dict, state: SpaceState,
+    def _judge(self, chat, creds, space_name: str, config: Dict, state: SpaceState,
                now: datetime.datetime) -> Optional[Decision]:
         """Ask the gate about the pending batch, logging the decision or the failure."""
-        messages = self._gate_messages(creds, state, now)
+        messages = self._gate_messages(chat, creds, config, state, now)
         started = self._clock()
         try:
             decision = self.gate.judge('group', messages, config.get('norms', ''))
@@ -1000,16 +1006,21 @@ class Channel:
                         'names': [m['name'] for m, _, _ in state.pending]})
         return decision
 
-    def _gate_messages(self, creds, state: SpaceState, now: datetime.datetime) -> List[GateMessage]:
+    def _gate_messages(self, chat, creds, config: Dict, state: SpaceState,
+                       now: datetime.datetime) -> List[GateMessage]:
         """The pending batch as the gate reads it, after the recent messages it follows:
         its threads', and the main flow's when it has main-flow messages."""
         pending = {m['name']: f for m, f, _ in state.pending}
         newest = max(m['createTime'] for m, _, _ in state.pending)
         threads = {_thread(m) for m, _, _ in state.pending if m.get('threadReply')}
         main_flow = any(not m.get('threadReply') for m, _, _ in state.pending)
-        history = [m for m in state.buffer
-                   if m['name'] not in pending and m['createTime'] < newest
-                   and (_thread(m) in threads or (main_flow and not m.get('threadReply')))][-GATE_HISTORY:]
+        scopes = threads | ({'main'} if main_flow else set())
+        earlier = {m['name']: m for scope in scopes for m in self._gate_history(chat, config, state, scope, now)}
+        earlier.update((m['name'], m) for m in state.buffer)
+        history = sorted((m for m in earlier.values()
+                          if m['name'] not in pending and m['createTime'] < newest
+                          and (_thread(m) in threads or (main_flow and not m.get('threadReply')))),
+                         key=lambda m: m['createTime'])[-GATE_HISTORY:]
 
         def gate_message(msg: Dict, flags: Optional[Flags]) -> GateMessage:
             own = is_own(msg)
@@ -1024,11 +1035,42 @@ class Channel:
                 mentions_others=mentions_someone(msg), new=flags is not None, agent_action=state.silent.get(msg['name'], ''),
                 edited=bool(msg.get('lastUpdateTime')))
         shown = {m['name'] for m in history} | set(pending)
-        scopes = {_scope(m) for m, _, _ in state.pending}
         spoke = sorted((m for scope in scopes for m in state.last_spoke.get(scope, []) if m['name'] not in shown),
                        key=lambda m: m['createTime'])
         return ([gate_message(m, None) for m in spoke + history]
                 + [gate_message(m, f) for m, f, _ in state.pending])
+
+    def _gate_history(self, chat, config: Dict, state: SpaceState, scope: str,
+                      now: datetime.datetime) -> List[Dict]:
+        """The last GATE_HISTORY messages of a conversation from before the buffer
+        began, asked of Chat the first time the gate judges it.
+
+        The buffer only holds what this poller saw, so after a restart a reply in
+        a thread the bot had been talking in reached Jev alone and read as small
+        talk. A failed read is logged and asked again next time, and the batch is
+        judged on what the buffer has.
+        """
+        if scope in state.gate_history:
+            return state.gate_history[scope][1]
+        start = min((m['createTime'] for m in state.buffer if _scope(m) == scope), default=None)
+        query = f'createTime > "{(now - MEMORY_WINDOW).isoformat().replace("+00:00", "Z")}"'
+        if start:
+            query += f' AND createTime < "{start}"'
+        if scope != 'main':
+            query = f'thread.name = {scope} AND {query}'
+        try:
+            listed = chat.spaces().messages().list(
+                parent=state.pending[0][0]['name'].split('/messages/')[0],
+                pageSize=GATE_HISTORY if scope != 'main' else 100, orderBy='createTime DESC', filter=query).execute()
+        except Exception:
+            logger.exception("Reading the history of %s for the gate failed", scope)
+            return []
+        # The main flow's query holds thread replies too, which are not its history.
+        messages = [m for m in listed.get('messages', [])
+                    if (scope != 'main' or not m.get('threadReply'))
+                    and (is_own(m) or sender_allowed(m, config.get('allowed_senders')))][:GATE_HISTORY]
+        state.gate_history[scope] = (now, messages)
+        return messages
 
     def _prune_gate_log(self, now: datetime.datetime) -> None:
         """Drop entries older than gate_log_days, at most once an hour."""

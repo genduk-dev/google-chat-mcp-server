@@ -1186,6 +1186,37 @@ class GatedSpaceTest(SpaceCase):
         self.poll([self.m('m2', OTHER, '@genduk oke', 10)], 11)
         self.assertEqual(len(self.gap_queries), 1)       # seen now, and the buffer covers the rest
 
+    def test_after_a_restart_jev_reads_the_thread_the_bot_was_talking_in(self):
+        thread = f'{SPACE}/threads/T1'
+        self.threads[thread] = [self.own('g1', 'Ga inget, logram itu apa?', -1990, 'T1'),
+                                self.m('h1', OTHER, 'Nduk, logram itu project lama', -2000, reply=True)]
+        self.scored(addressed=0.9, wants_reply=0.9)
+        self.poll([self.m('m1', OTHER, 'coba cari lagi', 0, reply=True)], 1)
+        self.poll([], 5)
+        texts = [(m['text'], m.get('from_agent', False)) for m in self.jev.ask.call_args.args[0]['messages']]
+        self.assertEqual(texts, [('Nduk, logram itu project lama', False), ('Ga inget, logram itu apa?', True),
+                                 ('coba cari lagi', False)])
+        # The gate's read, then the delivery's own for the fresh session.
+        self.assertEqual(self.gap_queries[0],
+                         f'thread.name = {thread} AND createTime > "{ts(5 - 86400)}" AND createTime < "{ts(0)}"')
+        asked = len(self.gap_queries)
+        self.poll([self.m('m2', OTHER, 'yang di bulan mei', 10, reply=True)], 11)
+        self.poll([], 15)
+        self.assertEqual(self.jev.ask.call_count, 2)
+        self.assertEqual(len(self.gap_queries), asked)     # asked once per conversation
+
+    def test_a_failed_history_read_is_judged_on_the_buffer_and_asked_again(self):
+        def failing(**kwargs):
+            if kwargs.get('orderBy') == 'createTime DESC':
+                raise RuntimeError('503')
+            return self.listing(**kwargs)
+        self.chat.spaces().messages().list.side_effect = failing
+        self.poll([self.m('m1', OTHER, 'coba cari lagi', 0, reply=True)], 1)
+        with self.assertLogs(channel.logger, 'ERROR'):
+            self.poll([], 5)
+        self.assertEqual(self.jev.ask.call_count, 1)
+        self.assertNotIn(f'{SPACE}/threads/T1', self.ch.states[SPACE].gate_history)
+
     def test_list_watched_names_the_gate(self):
         self.ch.active = True
         self.assertEqual(self.ch.list_watched()['gate'], 'jev')
