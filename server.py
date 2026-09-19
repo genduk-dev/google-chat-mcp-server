@@ -661,18 +661,20 @@ def run_channel(args) -> None:
         """Start pushing new messages from a Google Chat space into this Claude Code session,
         or replace the settings of a space that is already watched.
 
-        Only messages from allowed_senders are delivered. When omitted, only the
-        authenticated user is allowed. With mention_only, only messages that
-        mention @BOT_NAME (case-insensitive) are delivered; without it, every
-        message from an allowed sender is. Calling again replaces both settings,
-        so pass the current allowed_senders when you only want to change
-        mention_only. Takes
-        effect on the next poll; history before this call is never replayed.
+        Without allowed_senders, messages from everyone in the space are delivered;
+        with it, only messages from those users. Without mention_only, every such
+        message is delivered. With mention_only, the session is idle until someone
+        addresses @BOT_NAME (a case-insensitive @mention, or a quote reply to one of
+        its messages); then every message in the space is delivered until nobody has
+        addressed it for 10 minutes, or for an hour at most. Calling again replaces
+        both settings, so pass the current allowed_senders when you only want to
+        change mention_only. Takes effect on the next poll; history before this call
+        is never replayed.
 
         Args:
             space_name: The space to watch (format: 'spaces/SPACE_ID')
             allowed_senders: Optional list of 'users/USER_ID' whose messages are delivered
-            mention_only: Deliver only messages that mention @BOT_NAME
+            mention_only: Stay idle in the space until someone addresses @BOT_NAME
         """
         return _json(channel.watch(space_name, allowed_senders, mention_only))
 
@@ -684,22 +686,46 @@ def run_channel(args) -> None:
         """
         return _json(channel.unwatch(space_name))
 
+    def leave_conversation(space_name: str) -> str:
+        """Go idle in a mention_only space now instead of when the conversation goes
+        quiet: from the next poll, only messages that address @BOT_NAME are delivered
+        there. Call it when someone ends the conversation with you or asks you to stop.
+
+        Args:
+            space_name: The space to leave (format: 'spaces/SPACE_ID', the chat_id)
+        """
+        return _json(channel.leave(space_name))
+
+    def mute_space(space_name: str, minutes: int) -> str:
+        """Go idle in a space and, for the given minutes, deliver nothing from it except
+        the operator addressing @BOT_NAME. Call it only when the operator asks you to
+        keep quiet there. minutes=0 lifts a mute.
+
+        Args:
+            space_name: The space to mute (format: 'spaces/SPACE_ID', the chat_id)
+            minutes: How long the mute lasts; 0 lifts it
+        """
+        return _json(channel.mute(space_name, minutes))
+
     def list_watched_spaces() -> str:
         """List the channel config: the bot name and its @mention, the message ID prefix
         that marks this server's own messages, which process is polling (poller.active_here
         is false when another channel session on this machine receives the messages;
         poller.heartbeat is its last renewal, and poller.stale means that poller exited or
-        hung and a standby session takes over within a poll), and each watched space with its allowed senders and mention_only setting. The bot name
-        comes from the BOT_NAME env var and cannot be changed by a tool."""
+        hung and a standby session takes over within a poll), and each watched space with
+        its allowed senders (null means everyone in the space), its mention_only setting,
+        left_at and muted_until when set, and for a mention_only space on the polling
+        session its presence, active or idle. The bot name comes from the BOT_NAME env var
+        and cannot be changed by a tool."""
         return _json(channel.list_watched())
 
     # On the event loop, like the poller that reads the same state.
-    for fn in (watch_space, unwatch_space, list_watched_spaces):
+    for fn in (watch_space, unwatch_space, leave_conversation, mute_space, list_watched_spaces):
         app.tool(fn, output_schema=None, run_in_thread=False)
 
     server = app._mcp_server
     server.instructions = INSTRUCTIONS
-    # Permission relay is safe to offer: only allowlisted senders can answer.
+    # Permission relay is safe to offer: only the operator can answer.
     options = server.create_initialization_options(
         experimental_capabilities={'claude/channel': {}, 'claude/channel/permission': {}})
 

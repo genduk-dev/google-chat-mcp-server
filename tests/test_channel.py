@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import channel
-from channel import Channel, ChannelStore, should_deliver, to_notification
+from channel import Channel, ChannelStore, Flags, is_own, mentions_bot, sender_allowed, to_notification
 from google_chat import APP_MESSAGE_PREFIX
 
 OWNER = 'users/111'
@@ -24,28 +24,29 @@ def message(name, sender=OWNER, text='hi', create_time='2026-09-18T06:00:01.0000
 
 
 class GateTest(unittest.TestCase):
-    def test_allowed_sender_is_delivered(self):
-        self.assertTrue(should_deliver(message('m1'), [OWNER]))
+    def test_allowlist_or_everyone(self):
+        self.assertTrue(sender_allowed(message('m1'), [OWNER]))
+        self.assertFalse(sender_allowed(message('m1', sender=OTHER), [OWNER]))
+        self.assertTrue(sender_allowed(message('m1', sender=OTHER), None))
 
-    def test_sender_not_on_allowlist_is_dropped(self):
-        self.assertFalse(should_deliver(message('m1', sender=OTHER), [OWNER]))
-
-    def test_own_reply_is_dropped_even_from_allowed_sender(self):
-        msg = message('m1', client_id=f'{APP_MESSAGE_PREFIX}abc')
-        self.assertFalse(should_deliver(msg, [OWNER]))
-
-    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
-    def test_mention_only_requires_a_standalone_case_insensitive_bot_mention(self):
-        self.assertTrue(should_deliver(message('m1', text='hey @Genduk check this'), [OWNER], True))
-        self.assertTrue(should_deliver(message('m1', text='@genduk: deploy'), [OWNER], True))
-        self.assertFalse(should_deliver(message('m1', text='lunch?'), [OWNER], True))
-        self.assertFalse(should_deliver(message('m1', text='ask @gendukku'), [OWNER], True))
-        self.assertFalse(should_deliver(message('m1', text='genduk without the at sign'), [OWNER], True))
-        self.assertTrue(should_deliver(message('m1', text='lunch?'), [OWNER], False))
+    def test_own_message_is_recognized_by_its_client_id(self):
+        self.assertTrue(is_own(message('m1', client_id=f'{APP_MESSAGE_PREFIX}abc')))
+        self.assertFalse(is_own(message('m1')))
 
     @mock.patch.object(channel, 'BOT_NAME', 'genduk')
-    def test_mention_does_not_bypass_the_sender_allowlist(self):
-        self.assertFalse(should_deliver(message('m1', sender=OTHER, text='@genduk run it'), [OWNER], True))
+    def test_mention_is_a_standalone_case_insensitive_token(self):
+        self.assertTrue(mentions_bot('hey @Genduk check this'))
+        self.assertTrue(mentions_bot('@genduk: deploy'))
+        self.assertFalse(mentions_bot('lunch?'))
+        self.assertFalse(mentions_bot('ask @gendukku'))
+        self.assertFalse(mentions_bot('genduk without the at sign'))
+        self.assertFalse(mentions_bot('@all lunch?'))
+
+    def test_another_bot_never_addresses_ours(self):
+        self.assertTrue(Flags(mentioned=True).addressed)
+        self.assertTrue(Flags(replying_to_bot=True).addressed)
+        self.assertFalse(Flags(mentioned=True, bot_sender=True).addressed)
+        self.assertFalse(Flags(operator=True).addressed)
 
 
 class NotificationTest(unittest.TestCase):
@@ -119,6 +120,7 @@ class PollTest(unittest.TestCase):
             mock.patch.object(channel, 'get_credentials', return_value=object()),
             mock.patch.object(channel, '_get_service', return_value=self.chat),
             mock.patch.object(channel, 'get_user_display_name', return_value='Husni'),
+            mock.patch.object(channel, 'self_user_id', return_value=OWNER),
         ]
         for p in patches:
             p.start()
@@ -182,29 +184,20 @@ class PollTest(unittest.TestCase):
             message('m1', text='just chatting', create_time='2026-09-18T07:00:01Z'),
             message('m2', text='@Genduk summarize', create_time='2026-09-18T07:00:02Z'),
         ])
-        self.assertEqual([n['content'] for n in ch.poll_once()], ['@Genduk summarize'])
+        out = ch.poll_once()
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['content'],
+                         'Earlier, not sent to you before:\n'
+                         f'[Husni (operator), 07:00Z, {SPACE}/threads/T1]\njust chatting\n\n'
+                         'New:\n'
+                         f'[Husni (operator, mentions you), 07:00Z, {SPACE}/threads/T1]\n@Genduk summarize')
+        self.assertEqual(out[0]['meta']['mentioned'], 'true')
+        self.assertEqual(out[0]['meta']['presence'], 'active')
 
     def threaded(self, name, thread, text, time, **kw):
         msg = message(name, text=text, create_time=time, **kw)
         msg['thread'] = {'name': f'{SPACE}/threads/{thread}'}
         return msg
-
-    @mock.patch.object(channel, 'BOT_NAME', 'genduk')
-    def test_mention_only_thread_followups_need_no_mention(self):
-        self.store.save({SPACE: {'allowed_senders': [OWNER], 'mention_only': True}})
-        ch = Channel(self.store, 5)
-        ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
-        self.list_returns([
-            self.threaded('m1', 'A', '@genduk check the deploy', '2026-09-18T06:00:01Z'),
-            self.threaded('m2', 'A', 'the staging one', '2026-09-18T06:10:00Z'),          # follow-up
-            self.threaded('m3', 'B', 'unrelated chatter', '2026-09-18T06:10:01Z'),        # other thread
-            self.threaded('m4', 'A', 'still there?', '2026-09-18T06:41:00Z'),             # 31 min later
-            self.threaded('m5', 'C', 'reply from Claude', '2026-09-18T06:42:00Z',
-                          client_id=f'{APP_MESSAGE_PREFIX}x'),
-            self.threaded('m6', 'C', 'thanks, one more', '2026-09-18T06:43:00Z'),         # after our reply
-        ])
-        self.assertEqual([n['content'] for n in ch.poll_once()],
-                         ['@genduk check the deploy', 'the staging one', 'thanks, one more'])
 
     @staticmethod
     def edit_event(msg, time):
@@ -220,12 +213,12 @@ class PollTest(unittest.TestCase):
         added = self.threaded('m1', 'A', '@genduk deploy staging', '2026-09-18T05:00:00Z', )
         added['lastUpdateTime'] = '2026-09-18T06:00:05Z'
         plain = self.threaded('m2', 'B', 'still no mention', '2026-09-18T05:00:00Z')
-        plain['lastUpdateTime'] = '2026-09-18T06:00:06Z'
+        plain['lastUpdateTime'] = '2026-09-18T06:00:04Z'   # while idle, before the mention
         ours = self.threaded('m3', 'C', '@genduk prompt *Allowed*', '2026-09-18T05:00:00Z',
                              client_id=f'{APP_MESSAGE_PREFIX}p')
         ours['lastUpdateTime'] = '2026-09-18T06:00:07Z'
         gone = dict(added, name=f'{SPACE}/messages/m4', deleteTime='2026-09-18T06:00:08Z')
-        self.events([self.edit_event(m, m['lastUpdateTime']) for m in (added, plain, ours)] +
+        self.events([self.edit_event(m, m['lastUpdateTime']) for m in (plain, added, ours)] +
                     [self.edit_event(gone, '2026-09-18T06:00:08Z')])
         out = ch.poll_once()
         self.assertEqual([(n['content'], n['meta']['edited'], n['meta']['edited_at']) for n in out],
@@ -259,18 +252,16 @@ class PollTest(unittest.TestCase):
         self.assertIn(SPACE, ch.edit_cursors)
         self.chat.spaces().spaceEvents().list.assert_not_called()
 
-    def test_active_threads_survive_a_takeover(self):
+    def test_presence_is_not_resumed_by_a_takeover(self):
         ch = Channel(self.store, 5)
         ch.cursors[SPACE] = '2026-09-18T06:00:00Z'
-        now = channel.datetime.datetime.now(channel.datetime.timezone.utc)
-        recent = now.isoformat().replace('+00:00', 'Z')
-        ch.active_threads = {f'{SPACE}/threads/A': recent, f'{SPACE}/threads/OLD': '2026-01-01T00:00:00Z'}
+        ch.states[SPACE] = channel.SpaceState()
+        ch.states[SPACE].address(channel.datetime.datetime.now(channel.datetime.timezone.utc))
         ch._save_cursors()
-        saved = json.loads(ch.cursor_path.read_text())
-        self.assertEqual(list(saved['threads']), [f'{SPACE}/threads/A'])   # expired one pruned
-        other = Channel(self.store, 5)
-        other._resume_cursors()
-        self.assertEqual(other.active_threads, {f'{SPACE}/threads/A': recent})
+        self.assertNotIn('threads', json.loads(ch.cursor_path.read_text()))
+        ch._resume_cursors()
+        self.assertEqual(ch.states, {})
+        self.assertEqual(ch.cursors, {SPACE: '2026-09-18T06:00:00Z'})
 
     def test_failed_space_keeps_its_cursor(self):
         ch = Channel(self.store, 5)
@@ -279,15 +270,14 @@ class PollTest(unittest.TestCase):
         self.assertEqual(ch.poll_once(), [])
         self.assertEqual(ch.cursors[SPACE], '2026-09-18T06:00:00Z')
 
-    def test_watch_defaults_allowlist_to_self_and_unwatch_removes(self):
+    def test_watch_defaults_to_everyone_and_unwatch_removes(self):
         ch = Channel(ChannelStore(Path(self.dir.name) / 'fresh.json'), 5)
         self.chat.spaces().get.return_value.execute.return_value = {'displayName': 'Claude'}
-        with mock.patch.object(channel, 'self_user_id', return_value=OWNER):
-            result = ch.watch(SPACE)
-        self.assertEqual(result['allowed_senders'], [OWNER])
+        result = ch.watch(SPACE)
+        self.assertIsNone(result['allowed_senders'])
         self.assertFalse(result['mention_only'])
         self.assertEqual(ch.list_watched()['spaces'],
-                         [{'space_name': SPACE, 'allowed_senders': [OWNER], 'mention_only': False}])
+                         [{'space_name': SPACE, 'allowed_senders': None, 'mention_only': False}])
         self.assertEqual(ch.unwatch(SPACE), {'space_name': SPACE, 'removed': True})
         self.assertEqual(ch.list_watched()['spaces'], [])
 
@@ -298,6 +288,297 @@ class PollTest(unittest.TestCase):
         self.assertEqual((listed['bot_name'], listed['mention'], listed['message_id_prefix']),
                          ('genduk', '@genduk', 'client-genduk-'))
 
+
+
+T0 = channel.datetime.datetime(2026, 9, 18, 7, 0, tzinfo=channel.datetime.timezone.utc)
+NAMES = {OWNER: 'Husni', OTHER: 'Budi', 'users/bot': 'Deploy Bot'}
+
+
+def at(seconds):
+    return T0 + channel.datetime.timedelta(seconds=seconds)
+
+
+def ts(seconds):
+    return at(seconds).isoformat().replace('+00:00', 'Z')
+
+
+class SpaceCase(unittest.TestCase):
+    """A mention_only space open to everyone, polled with a controlled clock."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = ChannelStore(Path(self.dir.name) / 'state.json')
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True}})
+        self.chat = mock.MagicMock()
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {}
+        self.listed = []
+        self.threads = {}
+        self.chat.spaces().messages().list.side_effect = self.listing
+        patches = [
+            mock.patch.object(channel, 'get_credentials', return_value=object()),
+            mock.patch.object(channel, '_get_service', return_value=self.chat),
+            mock.patch.object(channel, 'get_user_display_name', side_effect=lambda sender, creds: NAMES[sender['name']]),
+            mock.patch.object(channel, 'self_user_id', return_value=OWNER),
+            mock.patch.object(channel, 'space_display_name', return_value='AI Gone Wild'),
+            mock.patch.object(channel, 'BOT_NAME', 'genduk'),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.ch = Channel(self.store, 5)
+        self.ch.cursors[SPACE] = self.ch.edit_cursors[SPACE] = ts(-60)
+
+    def listing(self, **kwargs):
+        call = mock.MagicMock()
+        if kwargs['filter'].startswith('thread.name'):
+            thread = kwargs['filter'].split(' ')[2]
+            call.execute.return_value = {'messages': self.threads.get(thread, [])}
+        else:
+            call.execute.return_value = {'messages': self.listed}
+        return call
+
+    def m(self, name, sender, text, sec, thread='T1', reply=False, **extra):
+        msg = {'name': f'{SPACE}/messages/{name}', 'sender': {'name': sender, 'type': 'BOT' if sender == 'users/bot' else 'HUMAN'},
+               'text': text, 'createTime': ts(sec), 'thread': {'name': f'{SPACE}/threads/{thread}'}, **extra}
+        if reply:
+            msg['threadReply'] = True
+        return msg
+
+    def own(self, name, text, sec, thread='T1'):
+        return self.m(name, OWNER, text, sec, thread, clientAssignedMessageId=f'{APP_MESSAGE_PREFIX}{name}')
+
+    def poll(self, messages, now):
+        self.listed = messages
+        with mock.patch.object(self.ch, '_clock', return_value=at(now)):
+            return self.ch.poll_once()
+
+    def reactions(self):
+        return [c.kwargs['parent'].split('/')[-1] for c in self.chat.spaces().messages().reactions().create.call_args_list]
+
+
+class PresenceTest(SpaceCase):
+    def test_idle_space_delivers_only_what_addresses_the_bot_with_what_came_before(self):
+        self.assertEqual(self.poll([self.m('m1', OTHER, 'lunch?', 0)], 1), [])
+        out = self.poll([self.m('m2', OTHER, '@genduk any ideas?', 2)], 3)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['content'],
+                         'Earlier, not sent to you before:\n'
+                         f'[Budi, 07:00Z, {SPACE}/threads/T1]\nlunch?\n\n'
+                         'New:\n'
+                         f'[Budi (mentions you), 07:00Z, {SPACE}/threads/T1]\n@genduk any ideas?')
+        meta = out[0]['meta']
+        self.assertEqual((meta['mentioned'], meta['presence'], meta['message_name']),
+                         ('true', 'active', f'{SPACE}/messages/m2'))
+        self.assertNotIn('sender_is_operator', meta)
+
+    def test_present_bot_reads_everything_in_one_delivery_once_the_chat_pauses(self):
+        self.assertEqual(len(self.poll([self.m('m1', OTHER, '@genduk ideas?', 0)], 1)), 1)
+        self.assertEqual(self.poll([self.m('m2', OTHER, 'aku setuju', 10, thread='T2'),
+                                    self.m('m3', OWNER, 'sama', 11, thread='T3')], 12), [])
+        self.assertEqual(self.poll([], 15), [])          # 3 s of quiet
+        out = self.poll([], 16)                          # 4 s
+        self.assertEqual(out[0]['content'],
+                         'New:\n'
+                         f'[Budi, 07:00Z, {SPACE}/threads/T2]\naku setuju\n'
+                         f'[Husni (operator), 07:00Z, {SPACE}/threads/T3]\nsama')
+        meta = out[0]['meta']
+        self.assertEqual((meta['sender_is_operator'], meta['thread_name'], meta['presence']),
+                         ('true', f'{SPACE}/threads/T3', 'active'))
+        self.assertNotIn('mentioned', meta)
+        self.assertEqual(self.reactions(), ['m1'])       # only what addressed the bot
+
+    def test_a_busy_chat_is_delivered_after_batch_max(self):
+        self.poll([self.m('m1', OTHER, '@genduk hi', 0)], 1)
+        for i, now in enumerate(range(2, 20, 3)):
+            self.assertEqual(self.poll([self.m(f'n{i}', OTHER, 'more', now)], now), [])
+        self.assertEqual(len(self.poll([self.m('last', OTHER, 'more', 22)], 22)), 1)
+
+    def test_a_mention_brings_the_waiting_messages_with_it(self):
+        self.poll([self.m('m1', OTHER, '@genduk hi', 0)], 1)
+        self.poll([self.m('m2', OTHER, 'btw', 5)], 5)
+        out = self.poll([self.m('m3', OTHER, '@genduk and this?', 6)], 6)
+        self.assertEqual(len(out), 1)
+        self.assertIn('btw', out[0]['content'].split('New:')[1])
+        self.assertEqual(out[0]['meta']['message_name'], f'{SPACE}/messages/m3')
+
+    def test_presence_ends_ten_minutes_after_the_bot_was_last_addressed_or_spoke(self):
+        self.poll([self.m('m1', OTHER, '@genduk hi', 0)], 1)
+        self.poll([self.own('b1', 'halo', 500)], 501)
+        self.poll([self.m('m2', OTHER, 'still here', 1000)], 1000)
+        self.assertEqual(len(self.poll([], 1005)), 1)     # 1000 is within 10 min of the bot's reply
+        self.assertEqual(self.poll([self.m('m3', OTHER, 'hello?', 1101)], 1101), [])
+        self.assertEqual(self.poll([], 1200), [])
+        self.assertFalse(self.ch.busy())
+
+    def test_the_bot_speaking_while_idle_does_not_start_presence(self):
+        self.poll([self.own('b1', 'good morning', 0)], 1)
+        self.assertEqual(self.poll([self.m('m1', OTHER, 'morning', 5)], 5), [])
+        self.assertEqual(self.poll([], 30), [])
+
+    def test_presence_ends_an_hour_after_it_began(self):
+        self.poll([self.m('m1', OTHER, '@genduk hi', 0)], 1)
+        for i, sec in enumerate(range(500, 3600, 500)):
+            self.poll([self.own(f'b{i}', 'reply', sec)], sec + 1)
+        self.assertEqual(self.poll([self.m('m2', OTHER, 'one more', 3601)], 3601), [])
+        self.assertEqual(self.poll([], 3700), [])
+
+    def test_leave_conversation_goes_idle_on_the_next_poll(self):
+        self.poll([self.m('m1', OTHER, '@genduk makasih', 0)], 1)
+        with mock.patch.object(self.ch, '_clock', return_value=at(2)):
+            self.assertEqual(self.ch.leave(SPACE), {'space_name': SPACE, 'presence': 'idle'})
+        self.assertEqual(self.poll([self.m('m2', OTHER, 'dah', 3)], 3), [])
+        self.assertEqual(self.poll([], 30), [])
+        self.assertEqual(len(self.poll([self.m('m3', OTHER, '@genduk lagi', 40)], 40)), 1)
+
+    def test_leave_needs_a_watched_space(self):
+        with self.assertRaises(ValueError):
+            self.ch.leave('spaces/NOPE')
+
+    def test_mute_lets_only_the_operator_addressing_the_bot_through(self):
+        with mock.patch.object(self.ch, '_clock', return_value=at(0)):
+            self.assertEqual(self.ch.mute(SPACE, 30)['muted_until'], ts(1800))
+        out = self.poll([self.m('m1', OTHER, '@genduk hi', 1), self.m('m2', OWNER, 'hi', 2),
+                         self.m('m3', OWNER, '@genduk you can talk again', 3)], 4)
+        self.assertEqual([n['meta']['message_name'] for n in out], [f'{SPACE}/messages/m3'])
+        with mock.patch.object(self.ch, '_clock', return_value=at(5)):
+            self.assertIsNone(self.ch.mute(SPACE, 0)['muted_until'])
+        self.assertNotIn('muted_until', self.store.load()[SPACE])
+        self.assertEqual(len(self.poll([self.m('m4', OTHER, '@genduk hi', 6)], 6)), 1)
+
+    def test_a_quote_reply_to_the_bot_addresses_it(self):
+        self.poll([self.own('b1', 'the build is green', 0)], 1)
+        quote = self.m('m1', OTHER, 'nice, why?', 700, quotedMessageMetadata={'name': f'{SPACE}/messages/b1'})
+        out = self.poll([quote], 701)
+        self.assertEqual(out[0]['meta']['replying_to_bot'], 'true')
+
+    def test_a_quote_of_an_old_message_is_read_once_to_see_whose_it_is(self):
+        old = self.own('b0', 'yesterday', -86400)
+        self.chat.spaces().messages().get.return_value.execute.return_value = old
+        quote = self.m('m1', OTHER, 'about this', 0, quotedMessageMetadata={'name': f'{SPACE}/messages/b0'})
+        out = self.poll([quote], 1)
+        self.assertEqual(out[0]['meta']['replying_to_bot'], 'true')
+        self.assertIn('[you, 07:00Z', out[0]['content'])   # the quoted message is its context
+        self.chat.spaces().messages().get.assert_called_once_with(name=f'{SPACE}/messages/b0')
+
+    def test_another_bot_neither_starts_nor_keeps_presence(self):
+        self.assertEqual(self.poll([self.m('m1', 'users/bot', '@genduk deploy done', 0)], 1), [])
+        self.poll([self.m('m2', OTHER, '@genduk hi', 2)], 3)
+        self.poll([self.m('m3', 'users/bot', '@genduk ping', 300)], 300)
+        self.poll([], 310)
+        self.assertEqual(self.poll([self.m('m4', OTHER, 'ok', 700)], 700), [])   # 698 s after Budi
+
+    def test_too_many_deliveries_in_an_hour_end_presence(self):
+        self.poll([self.m('m1', OTHER, '@genduk hi', 0)], 1)
+        self.ch.states[SPACE].deliveries = [at(1)] * channel.HOURLY_DELIVERIES
+        self.assertEqual(self.poll([self.m('m2', OTHER, 'chatter', 5)], 5), [])
+        self.assertFalse(self.ch.states[SPACE].is_active(at(6)))
+        self.assertEqual(len(self.poll([self.m('m3', OTHER, '@genduk still?', 7)], 7)), 1)
+
+    def test_context_leaves_out_what_the_session_has_seen(self):
+        self.poll([self.m('m1', OTHER, 'first', 0)], 0)
+        self.poll([self.m('m2', OTHER, '@genduk hi', 1)], 1)
+        with mock.patch.object(self.ch, '_clock', return_value=at(2)):
+            self.ch.leave(SPACE)
+        self.poll([self.m('m3', OTHER, 'second', 10)], 10)
+        out = self.poll([self.m('m4', OTHER, '@genduk again', 20)], 20)
+        earlier = out[0]['content'].split('New:')[0]
+        self.assertIn('second', earlier)
+        self.assertNotIn('first', earlier)
+        self.assertNotIn('@genduk hi', earlier)
+
+    def test_context_keeps_the_newest_and_says_how_many_it_left_out(self):
+        self.poll([self.m(f'c{i}', OTHER, f'line {i}', i) for i in range(25)], 30)
+        content = self.poll([self.m('m1', OTHER, '@genduk summarize', 40)], 40)[0]['content']
+        self.assertIn('(5 older left out; get_messages has them)', content)
+        self.assertNotIn('line 4\n', content)
+        self.assertIn('line 5\n', content)
+
+    def test_a_reply_in_a_thread_the_poller_never_saw_begin_fetches_it_once(self):
+        self.threads[f'{SPACE}/threads/OLD'] = [self.m('r0', OTHER, 'the question from yesterday', -86400, thread='OLD')]
+        first = self.m('m1', OTHER, '@genduk see above', 0, thread='OLD', reply=True)
+        out = self.poll([first], 1)
+        self.assertIn('the question from yesterday', out[0]['content'])
+        self.poll([self.m('m2', OTHER, '@genduk and?', 5, thread='OLD', reply=True)], 6)
+        thread_calls = [c for c in self.chat.spaces().messages().list.call_args_list
+                        if c.kwargs['filter'].startswith('thread.name')]
+        self.assertEqual(len(thread_calls), 1)
+        self.assertEqual(thread_calls[0].kwargs['filter'],
+                         f'thread.name = {SPACE}/threads/OLD AND createTime < "{ts(0)}"')
+
+    def test_a_thread_reply_gets_its_thread_not_the_main_flow(self):
+        self.poll([self.m('a', OTHER, 'main flow chatter', 0, thread='A'),
+                   self.m('b0', OTHER, 'thread start', 1, thread='B'),
+                   self.m('b1', OTHER, 'in the thread', 2, thread='B', reply=True)], 3)
+        content = self.poll([self.m('b2', OTHER, '@genduk thoughts?', 4, thread='B', reply=True)], 5)[0]['content']
+        self.assertIn('thread start', content)
+        self.assertIn('in the thread', content)
+        self.assertNotIn('main flow chatter', content)
+
+    def test_allowlist_keeps_others_out_of_delivery_and_context(self):
+        self.store.save({SPACE: {'allowed_senders': [OWNER], 'mention_only': True}})
+        self.poll([self.m('m1', OTHER, 'secret plan', 0)], 0)
+        self.assertEqual(self.poll([self.m('m2', OTHER, '@genduk run it', 1)], 1), [])
+        out = self.poll([self.m('m3', OWNER, '@genduk hi', 2)], 2)
+        self.assertEqual(out[0]['content'], '@genduk hi')
+
+    def test_an_edit_of_a_message_the_session_saw_arrives_while_idle(self):
+        self.poll([self.m('m1', OTHER, '@genduk deploy staging', 0)], 1)
+        with mock.patch.object(self.ch, '_clock', return_value=at(2)):
+            self.ch.leave(SPACE)
+        edited = self.m('m1', OTHER, '@genduk deploy prod', 0, lastUpdateTime=ts(100))
+        unseen = self.m('m9', OTHER, 'typo fixed', -5, lastUpdateTime=ts(99))
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {'spaceEvents': [
+            PollTest.edit_event(m, m['lastUpdateTime']) for m in (unseen, edited)]}
+        out = self.poll([], 102)
+        self.assertEqual([(n['content'], n['meta']['edited']) for n in out], [('@genduk deploy prod', 'true')])
+
+
+class OpenSpaceTest(SpaceCase):
+    """A space watched without mention_only: everything is for the bot."""
+
+    def setUp(self):
+        super().setUp()
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': False}})
+
+    def test_every_message_is_delivered_and_acknowledged_at_once(self):
+        out = self.poll([self.m('m1', OWNER, 'cek deploy', 0), self.m('m2', OWNER, 'yang staging', 1)], 2)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['meta']['sender_is_operator'], 'true')
+        self.assertNotIn('presence', out[0]['meta'])
+        self.assertEqual(self.reactions(), ['m1', 'm2'])
+        self.assertFalse(self.ch.busy())
+
+    def test_an_image_is_saved_and_its_path_delivered(self):
+        msg = self.m('m1', OWNER, 'what is this?', 0, attachment=[
+            {'contentName': 'shot.png', 'attachmentDataRef': {'resourceName': 'RES1'}},
+            {'contentName': 'plan.gdoc', 'driveDataRef': {'driveFileId': 'DRIVE1'}},
+            {'contentName': 'huge.mov', 'attachmentDataRef': {'resourceName': 'RES2'}}])
+
+        def save(creds, resource, save_dir, name, max_bytes):
+            self.assertEqual((save_dir, max_bytes), (str(self.ch.attachments_dir), channel.ATTACHMENT_MAX_BYTES))
+            if resource == 'RES2':
+                raise channel.AttachmentTooLarge('big')
+            return {'path': f'{save_dir}/gchat-1.png', 'contentType': 'image/png'}
+        with mock.patch.object(channel, 'save_attachment', side_effect=save):
+            content = self.poll([msg], 1)[0]['content']
+        self.assertEqual(content, 'what is this?\n'
+                                  f'[attachment shot.png (image/png): {self.ch.attachments_dir}/gchat-1.png]\n'
+                                  '[attachment plan.gdoc: Drive file https://drive.google.com/open?id=DRIVE1]\n'
+                                  '[attachment huge.mov: over 20 MB, not saved]')
+        self.assertEqual(self.ch.attachments_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_a_card_without_text_says_so(self):
+        out = self.poll([self.m('m1', OWNER, '', 0, cardsV2=[{'cardId': 'c'}])], 1)
+        self.assertEqual(out[0]['content'], '[a card]')
+
+    def test_old_attachments_are_deleted(self):
+        self.ch.attachments_dir.mkdir(mode=0o700)
+        old = self.ch.attachments_dir / 'gchat-old.png'
+        old.write_bytes(b'x')
+        os.utime(old, (0, 0))
+        self.ch._prune_attachments()
+        self.assertFalse(old.exists())
 
 
 class RunTest(unittest.TestCase):
@@ -341,14 +622,14 @@ class PermissionRelayTest(unittest.TestCase):
         cases = {'yes abcde': ('abcde', 'allow'), 'n ABCDE': ('abcde', 'deny'), 'Y abcde ': ('abcde', 'allow'),
                  '@genduk no qwert': ('qwert', 'deny')}
         for text, expected in cases.items():
-            self.assertEqual(channel.parse_verdict(message('m', text=text), [OWNER]), expected, text)
+            self.assertEqual(channel.parse_verdict(message('m', text=text), OWNER), expected, text)
         for text in ['yes', 'approve abcde', 'yes abcdl', 'yes abcdef', 'sure yes abcde']:
-            self.assertIsNone(channel.parse_verdict(message('m', text=text), [OWNER]), text)
+            self.assertIsNone(channel.parse_verdict(message('m', text=text), OWNER), text)
 
-    def test_verdict_needs_an_allowed_sender_and_not_our_own_message(self):
-        self.assertIsNone(channel.parse_verdict(message('m', sender=OTHER, text='yes abcde'), [OWNER]))
+    def test_verdict_needs_the_operator_and_not_our_own_message(self):
+        self.assertIsNone(channel.parse_verdict(message('m', sender=OTHER, text='yes abcde'), OWNER))
         own = message('m', text='yes abcde', client_id=f'{APP_MESSAGE_PREFIX}x')
-        self.assertIsNone(channel.parse_verdict(own, [OWNER]))
+        self.assertIsNone(channel.parse_verdict(own, OWNER))
 
     def test_prompt_shows_untrusted_fields_as_code(self):
         text = channel.permission_prompt({'request_id': 'abcde', 'tool_name': 'Bash',
@@ -406,7 +687,7 @@ class PermissionRelayTest(unittest.TestCase):
     def test_no_relay_to_a_thread_the_conversation_left_long_ago(self):
         ch = self.channel()
         ch.last_thread = (SPACE, f'{SPACE}/threads/T1',
-                          channel.datetime.datetime.now(channel.datetime.timezone.utc) - channel.FOLLOWUP_WINDOW
+                          channel.datetime.datetime.now(channel.datetime.timezone.utc) - channel.RELAY_WINDOW
                           - channel.datetime.timedelta(seconds=1))
         with mock.patch.object(channel, 'send_space_message') as send:
             asyncio.run(ch.on_permission_request({'request_id': 'abcde', 'tool_name': 'Bash'}))
@@ -437,7 +718,8 @@ class PermissionRelayTest(unittest.TestCase):
         chat.spaces().spaceEvents().list.return_value.execute.return_value = {}
         with mock.patch.object(channel, 'get_credentials', return_value=object()), \
                 mock.patch.object(channel, '_get_service', return_value=chat), \
-                mock.patch.object(channel, 'get_user_display_name', return_value='Husni'):
+                mock.patch.object(channel, 'get_user_display_name', return_value='Husni'), \
+                mock.patch.object(channel, 'self_user_id', return_value=OWNER):
             self.assertEqual(ch.poll_once(), [])
         self.assertEqual(ch._answered, [(SPACE, 'abcde', 'allow', 'Husni')])
 

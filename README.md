@@ -24,10 +24,13 @@ send in Chat into a Claude Code session and relays its permission prompts back.
   own status and do-not-disturb, and a space's notification setting.
 - **Names people Google cannot.** A deleted or hidden account shows as
   `users/ID`; tell the agent who it is and every later read shows the name.
-- **Runs as a Claude Code channel.** `@mention` the bot in a watched space and
-  the message reaches the session; replies in that thread follow without the
-  mention. Tool permission prompts show up in the thread and take `yes <id>` or
-  `no <id>`.
+- **Runs as a Claude Code channel.** Messages in a watched space reach the
+  session. In a mention-only space the bot waits for an `@mention` or a reply
+  to one of its messages, then reads the whole space until the conversation
+  goes quiet, and it answers only what is meant for it. Each delivery carries
+  the earlier messages it follows from, and attachments saved on the machine.
+  Tool permission prompts show up in the thread, and only you can answer them
+  with `yes <id>` or `no <id>`.
 
 ## Requirements
 
@@ -110,6 +113,12 @@ claude --mcp-config ~/.config/claude/gchat-channel.json \
 ```
 
 Then ask it to watch a space (`watch_space`, optionally `mention_only`).
+Everyone in the space can talk to the bot unless you pass `allowed_senders`.
+In a mention-only space it stays present for 10 minutes after it was last
+addressed, an hour at most, and leaves sooner when someone ends the
+conversation or you tell it to keep quiet (`mute_space`). Attachments of
+delivered messages are saved in `attachments/` beside the channel state and
+deleted after a week.
 
 **Always start that config with the flag, and on one machine only.**
 

@@ -11,7 +11,8 @@ sign-in, and optionally runs as a Claude Code channel. A personal fork of
 - `google_chat.py`: everything that talks to Google. Credentials, the Chat and
   People API calls, retries, and the compact output the tools return.
 - `channel.py`: the channel. Watched spaces, the poller and its lease, the
-  cursors, follow-up threads, edits, and the permission relay.
+  cursors, presence in mention-only spaces, batching, the context and
+  attachments a delivery carries, edits, and the permission relay.
 - `server_auth.py`, `auth_cli.py`: sign-in outside an agent, from upstream.
 - `tests/`: unit tests, no network.
 
@@ -55,8 +56,16 @@ a private tool, so breaking changes are fine; say so in the commit.
 ### Text from Chat or from Claude Code is untrusted
 
 It reaches Chat inside code (backticks or a fence), where mention and link
-markup stays inert. Only senders on a space's allowlist reach the session or
-answer a permission prompt.
+markup stays inert. Only senders on a space's allowlist reach the session, and
+by default that is everyone in the space. Only the operator, the signed-in
+user, answers a permission prompt.
+
+### Presence lives in the poller's memory
+
+Which spaces the bot is present in, what the session has seen, and the queued
+batch are in memory, so a restart or a takeover starts idle. What a tool
+changes (leave, mute) goes through the state file instead, because the tool
+may run in a session that is not polling.
 
 ## Commands
 

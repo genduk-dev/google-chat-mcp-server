@@ -1,6 +1,7 @@
 import os
 import asyncio
 import concurrent.futures
+import contextlib
 import http.server
 import threading
 import time
@@ -2030,41 +2031,61 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
         creds = get_credentials()
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
-
-        encoded_name = urllib.parse.quote(resource_name, safe='')
-        resp = _http(creds).get(f"{CHAT_API}/media/{encoded_name}", params={'alt': 'media'})
-        if not resp.ok:
-            raise ChatApiError('GET', 'media', resp.status_code, _error_detail(resp))
-
-        content_type = resp.headers.get('Content-Type', 'application/octet-stream')
-        data = resp.content
-
-        # Determine file extension: prefer content type, fallback to content_name
-        ext_map = {
-            'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif',
-            'image/webp': '.webp', 'application/pdf': '.pdf',
-            'text/plain': '.txt', 'application/json': '.json',
-        }
-        ext = ext_map.get(content_type)
-        if not ext and content_name:
-            _, ext = os.path.splitext(content_name)
-        if not ext:
-            ext = '.bin'
-        filename = f"gchat-{uuid.uuid4().hex[:8]}{ext}"
-        filepath = os.path.join(save_dir, filename)
-
-        os.makedirs(save_dir, exist_ok=True)
-        with open(filepath, 'wb') as f:
-            f.write(data)
-
-        return {
-            'path': filepath,
-            'contentName': content_name or filename,
-            'contentType': content_type,
-            'size': len(data),
-        }
+        return save_attachment(creds, resource_name, save_dir, content_name)
     except Exception as e:
         raise Exception(f"Failed to download attachment: {str(e)}")
+
+
+class AttachmentTooLarge(Exception):
+    pass
+
+
+def save_attachment(creds: Credentials, resource_name: str, save_dir: str,
+                    content_name: Optional[str] = None, max_bytes: Optional[int] = None) -> Dict:
+    """Download an attachment into save_dir as a new 0600 file; the body of download_attachment.
+
+    With max_bytes, a larger file raises AttachmentTooLarge after reading at most
+    max_bytes + 1 bytes, and nothing is written.
+    """
+    encoded_name = urllib.parse.quote(resource_name, safe='')
+    resp = _http(creds).get(f"{CHAT_API}/media/{encoded_name}", params={'alt': 'media'}, stream=True)
+    with contextlib.closing(resp):
+        if not resp.ok:
+            raise ChatApiError('GET', 'media', resp.status_code, _error_detail(resp))
+        content_type = resp.headers.get('Content-Type', 'application/octet-stream')
+        chunks, size = [], 0
+        for chunk in resp.iter_content(1 << 16):
+            chunks.append(chunk)
+            size += len(chunk)
+            if max_bytes is not None and size > max_bytes:
+                raise AttachmentTooLarge(f"larger than {max_bytes} bytes")
+    data = b''.join(chunks)
+
+    # Determine file extension: prefer content type, fallback to content_name
+    ext_map = {
+        'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif',
+        'image/webp': '.webp', 'application/pdf': '.pdf',
+        'text/plain': '.txt', 'application/json': '.json',
+    }
+    ext = ext_map.get(content_type)
+    if not ext and content_name:
+        _, ext = os.path.splitext(content_name)
+    if not ext:
+        ext = '.bin'
+    filename = f"gchat-{uuid.uuid4().hex[:8]}{ext}"
+    filepath = os.path.join(save_dir, filename)
+
+    os.makedirs(save_dir, exist_ok=True)
+    fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as f:
+        f.write(data)
+
+    return {
+        'path': filepath,
+        'contentName': content_name or filename,
+        'contentType': content_type,
+        'size': len(data),
+    }
 
 
 AUTH_WAIT_SECONDS = 600
