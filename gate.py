@@ -101,6 +101,8 @@ class Message:
     replies_to_agent: bool = False
     # It @-mentions someone other than the agent.
     mentions_others: bool = False
+    # Its sender edited it after sending.
+    edited: bool = False
     new: bool = False
     # What the agent did about this message: 'stayed_silent' or 'reacted'.
     agent_action: str = ''
@@ -110,7 +112,8 @@ class Message:
         for key in ('thread', 'agent_action'):
             if getattr(self, key):
                 out[key] = getattr(self, key)
-        for key in ('from_agent', 'from_bot', 'mentions_agent', 'replies_to_agent', 'mentions_others', 'new'):
+        for key in ('from_agent', 'from_bot', 'mentions_agent', 'replies_to_agent', 'mentions_others', 'edited',
+                    'new'):
             if getattr(self, key):
                 out[key] = True
         return out

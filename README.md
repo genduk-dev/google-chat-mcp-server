@@ -136,6 +136,7 @@ session answers, reacts with an emoji, joins in unasked, or stays out.
 | `CHANNEL_GATE_ALIASES` | Comma-separated nicknames people call the bot by |
 | `CHANNEL_GATE_MODEL`, `CHANNEL_GATE_URL` | Another model, or TypeSafe's own endpoint |
 | `CHANNEL_GATE_REPLY`, `_INTERJECT`, `_JOIN`, `_REACT`, `_PERSONAL`, `_INTERJECT_QUIET` | Thresholds, see `gate.py` |
+| `CHANNEL_GATE_LOG_DAYS` | How long `gate_log.jsonl` keeps an entry (default 14) |
 | `CHANNEL_TIMEZONE` | The zone delivery times are written in, for example `Asia/Jakarta` (any mode) |
 
 Each space in the channel state file may also set, by hand:
@@ -150,7 +151,8 @@ Each space in the channel state file may also set, by hand:
 Know what it sends: the new messages and up to twelve before them, cut to 400
 characters each, with sender names, plus the bot's description and the
 space's norms. Every decision goes to `gate_log.jsonl` beside the state, with
-that text. Reactions, the gate's and the 👀 acknowledgement, are made with
+that text, for `CHANNEL_GATE_LOG_DAYS`. An edit of a message the gate held
+back is judged again, so a question edited to name the bot can still reach it. Reactions, the gate's and the 👀 acknowledgement, are made with
 the signed-in user's own account, so in a space they show as that person.
 
 **Always start that config with the flag, and on one machine only.**

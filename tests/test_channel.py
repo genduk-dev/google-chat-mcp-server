@@ -1128,6 +1128,40 @@ class GatedSpaceTest(SpaceCase):
         self.assertEqual(channel._local(ts(-86400), ch.zone, at(60)), 'Sep 17 14:00 WIB')
         self.assertEqual(channel._local(ts(0), channel.datetime.timezone.utc, at(60)), '07:00Z')
 
+    def edit(self, msg, sec):
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {'spaceEvents': [
+            PollTest.edit_event(msg, ts(sec))]}
+
+    def test_an_edit_of_a_held_message_is_judged_again(self):
+        self.poll([self.m('m1', OTHER, 'makan di mana?', 0)], 1)
+        self.assertEqual(self.poll([], 5), [])            # held
+        self.edit(self.m('m1', OTHER, 'Nduk, makan di mana?', 0, lastUpdateTime=ts(20)), 20)
+        self.scored(addressed=0.9, wants_reply=0.9)
+        self.assertEqual(self.poll([], 21), [])           # queued, waiting for the pause
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {}
+        out = self.poll([], 26)
+        self.assertEqual((out[0]['meta']['gate'], out[0]['content']), ('reply', 'Nduk, makan di mana?'))
+        s = self.jev.ask.call_args.args[0]
+        self.assertTrue(s['messages'][-1]['edited'])
+        self.assertEqual(self.jev.ask.call_count, 2)
+
+    def test_an_edit_of_a_held_message_that_changes_nothing_is_not_judged(self):
+        self.poll([self.m('m1', OTHER, 'makan  di mana?', 0)], 1)
+        self.poll([], 5)
+        self.edit(self.m('m1', OTHER, 'Makan di mana?', 0, lastUpdateTime=ts(20)), 20)
+        self.assertEqual(self.poll([], 21), [])
+        self.chat.spaces().spaceEvents().list.return_value.execute.return_value = {}
+        self.assertEqual(self.poll([], 30), [])
+        self.assertEqual(self.jev.ask.call_count, 1)
+
+    def test_the_gate_log_keeps_two_weeks(self):
+        old = {'at': ts(-15 * 86400), 'event': 'decision'}
+        recent = {'at': ts(-86400), 'event': 'decision'}
+        self.ch.gate_log_path.write_text(json.dumps(old) + '\n' + json.dumps(recent) + '\n')
+        self.poll([], 1)
+        self.assertEqual([json.loads(l)['at'] for l in self.ch.gate_log_path.read_text().splitlines()], [recent['at']])
+        self.assertEqual(self.ch.gate_log_path.stat().st_mode & 0o777, 0o600)
+
     def test_list_watched_names_the_gate(self):
         self.ch.active = True
         self.assertEqual(self.ch.list_watched()['gate'], 'jev')

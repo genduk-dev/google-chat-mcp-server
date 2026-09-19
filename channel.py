@@ -449,7 +449,10 @@ class Channel:
         zone = os.environ.get('CHANNEL_TIMEZONE', '')
         self.zone = zoneinfo.ZoneInfo(zone) if zone else datetime.timezone.utc
         # Every gate decision and error, one JSON object a line, to tune the gate by.
+        # It holds chat text, so entries older than CHANNEL_GATE_LOG_DAYS go.
         self.gate_log_path = store.path.with_name('gate_log.jsonl')
+        self.gate_log_days = int(os.environ.get('CHANNEL_GATE_LOG_DAYS', '14'))
+        self._gate_log_pruned: Optional[datetime.datetime] = None
         self.lease_path = store.path.with_name('channel.lease')
         # Held only while the lease is read and written, so two standbys cannot
         # both take a stale lease. Not channel.lock: older versions hold that
@@ -726,6 +729,7 @@ class Channel:
         operator = self_user_id(creds)
         now = self._clock()
         out = []
+        self._prune_gate_log(now)
         for space_name, config in spaces.items():
             if space_name not in self.cursors:
                 self.cursors[space_name] = self.edit_cursors[space_name] = self._now()
@@ -886,6 +890,28 @@ class Channel:
             state.saw(msg)
         return notification
 
+    def _regate_edit(self, config: Dict, state: SpaceState, msg: Dict, flags: Flags,
+                     now: datetime.datetime) -> bool:
+        """With the gate, an edit of a message the session never saw is judged again.
+
+        The edited version joins the pending batch, in place of the original if
+        it is still waiting, so "lunch?" edited to "Nduk, lunch?" can now reach
+        the session. An edit that only changes spacing or case is not worth a
+        judgment. An edit that addresses the bot, and one of a message the
+        session saw, go the ordinary way. Returns whether the edit was handled.
+        """
+        if not self.gate or flags.addressed or flags.bot_sender or msg['name'] in state.seen:
+            return False
+        before = next((m for m in state.buffer if m['name'] == msg['name']), None)
+        if not before:
+            return True   # too old to have context worth judging it in
+        state.remember(msg)
+        if _same_words(_body(before), _body(msg)) or self._left_recently(config, now):
+            return True
+        state.pending = [p for p in state.pending if p[0]['name'] != msg['name']] + [(msg, flags, now)]
+        state.silent.pop(msg['name'], None)
+        return True
+
     def _gated(self, chat, creds, space_name: str, config: Dict, state: SpaceState, operator: str,
                now: datetime.datetime) -> List[Dict]:
         """The pending batch of a gated space, once the chat paused: judged once until it
@@ -984,13 +1010,27 @@ class Channel:
                 from_bot=msg.get('sender', {}).get('type') == 'BOT',
                 mentions_agent=flags.mentioned if flags else (not own and mentions_bot(msg.get('text') or '')),
                 replies_to_agent=flags.replying_to_bot if flags else quoted in state.bot_messages,
-                mentions_others=mentions_someone(msg), new=flags is not None, agent_action=state.silent.get(msg['name'], ''))
+                mentions_others=mentions_someone(msg), new=flags is not None, agent_action=state.silent.get(msg['name'], ''),
+                edited=bool(msg.get('lastUpdateTime')))
         shown = {m['name'] for m in history} | set(pending)
         scopes = {_scope(m) for m, _, _ in state.pending}
         spoke = sorted((m for scope in scopes for m in state.last_spoke.get(scope, []) if m['name'] not in shown),
                        key=lambda m: m['createTime'])
         return ([gate_message(m, None) for m in spoke + history]
                 + [gate_message(m, f) for m, f, _ in state.pending])
+
+    def _prune_gate_log(self, now: datetime.datetime) -> None:
+        """Drop entries older than gate_log_days, at most once an hour."""
+        if not self.gate or not self.gate_log_path.exists():
+            return
+        if self._gate_log_pruned and now - self._gate_log_pruned < datetime.timedelta(hours=1):
+            return
+        self._gate_log_pruned = now
+        cutoff = (now - datetime.timedelta(days=self.gate_log_days)).isoformat().replace('+00:00', 'Z')
+        lines = self.gate_log_path.read_text().splitlines(keepends=True)
+        kept = [line for line in lines if json.loads(line).get('at', '') >= cutoff]
+        if len(kept) < len(lines):
+            write_private(self.gate_log_path, ''.join(kept))
 
     def _gate_log(self, entry: Dict) -> None:
         entry = {'at': self._now(), **entry}
@@ -1193,6 +1233,8 @@ class Channel:
                             continue
                         mention_only = bool(config.get('mention_only'))
                         filtered = mention_only or self.gate is not None
+                        if self._regate_edit(config, state, msg, flags, now):
+                            continue
                         if filtered and not (flags.addressed or state.is_active(at) or msg['name'] in state.seen):
                             continue
                         # The version the session saw, so it can tell a typo fix from a
