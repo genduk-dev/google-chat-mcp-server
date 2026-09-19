@@ -160,6 +160,14 @@ class FromEnvTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gate.from_env('Genduk', env)
 
+    def test_a_proxy_url_needs_no_key_and_gets_no_authorization_header(self):
+        env = {k: v for k, v in ENV.items() if k != 'OPENROUTER_API_KEY'}
+        jev = Jev({**env, 'CHANNEL_GATE_URL': 'https://openrouter.int.exe.xyz/api/alpha/decisions'})
+        with mock.patch.object(gate.requests, 'post', return_value=response(200, {'answers': answers()})) as post:
+            jev.ask({}, QUESTIONS)
+        self.assertEqual(post.call_args.args[0], 'https://openrouter.int.exe.xyz/api/alpha/decisions')
+        self.assertEqual(post.call_args.kwargs['headers'], {})
+
     def test_the_key_can_come_from_a_file(self):
         import tempfile
         with tempfile.NamedTemporaryFile('w', suffix='.key') as f:

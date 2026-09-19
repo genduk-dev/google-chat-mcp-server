@@ -250,8 +250,10 @@ class Jev:
         # A file keeps the key out of the environment the agent's own shell inherits.
         key_file = env.get('CHANNEL_GATE_KEY_FILE', '')
         self.key = Path(key_file).expanduser().read_text().strip() if key_file else env.get('OPENROUTER_API_KEY', '')
-        if not self.key:
-            raise ValueError('CHANNEL_GATE=jev needs CHANNEL_GATE_KEY_FILE or OPENROUTER_API_KEY')
+        # Another URL may be a proxy that adds the key itself (an exe.dev integration),
+        # so the key stays off the machine. OpenRouter's own endpoint always needs one.
+        if not self.key and not env.get('CHANNEL_GATE_URL'):
+            raise ValueError('CHANNEL_GATE=jev needs CHANNEL_GATE_KEY_FILE, OPENROUTER_API_KEY or CHANNEL_GATE_URL')
         self.url = env.get('CHANNEL_GATE_URL', 'https://openrouter.ai/api/alpha/decisions')
         self.model = env.get('CHANNEL_GATE_MODEL', 'typesafe/jev-1.13')
         self.sleep = sleep
@@ -263,7 +265,7 @@ class Jev:
         blocks the event loop meanwhile, and must stay well under its lease.
         """
         body = {'model': self.model, 'state': s, 'questions': questions}
-        headers = {'Authorization': f'Bearer {self.key}'}
+        headers = {'Authorization': f'Bearer {self.key}'} if self.key else {}
         for attempt in range(len(self.BACKOFF) + 1):
             try:
                 response = requests.post(self.url, json=body, headers=headers, timeout=self.TIMEOUT)

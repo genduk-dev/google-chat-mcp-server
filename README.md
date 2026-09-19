@@ -132,9 +132,9 @@ session answers, reacts with an emoji, joins in unasked, or stays out.
 | --- | --- |
 | `CHANNEL_GATE` | `rules` (the default, mentions and presence) or `jev` |
 | `CHANNEL_GATE_DESCRIPTION` | Who the bot is in the chat, which is all Jev knows about it. Required |
-| `CHANNEL_GATE_KEY_FILE` or `OPENROUTER_API_KEY` | The API key. A file keeps it out of the environment the session's own shell inherits |
+| `CHANNEL_GATE_KEY_FILE` or `OPENROUTER_API_KEY` | The API key. A file keeps it out of the environment the session's own shell inherits. Optional with `CHANNEL_GATE_URL`, for a proxy that adds the key itself |
 | `CHANNEL_GATE_ALIASES` | Comma-separated nicknames people call the bot by |
-| `CHANNEL_GATE_MODEL`, `CHANNEL_GATE_URL` | Another model, or TypeSafe's own endpoint |
+| `CHANNEL_GATE_MODEL`, `CHANNEL_GATE_URL` | Another model, or another endpoint: TypeSafe's own, or a proxy such as an exe.dev integration (`https://<name>.int.exe.xyz/api/alpha/decisions`) |
 | `CHANNEL_GATE_REPLY`, `_INTERJECT`, `_JOIN`, `_REACT`, `_PERSONAL`, `_INTERJECT_QUIET` | Thresholds, see `gate.py` |
 | `CHANNEL_GATE_LOG_DAYS` | How long `gate_log.jsonl` keeps an entry (default 14) |
 | `CHANNEL_TIMEZONE` | The zone delivery times are written in, for example `Asia/Jakarta` (any mode) |
