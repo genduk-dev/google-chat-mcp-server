@@ -958,14 +958,15 @@ class GatedSpaceTest(SpaceCase):
         self.assertFalse(self.ch.busy())
         out = self.poll([self.m('m2', OTHER, '@genduk kamu?', 10)], 10)
         self.assertIn('makan di mana?', out[0]['content'].split('New:')[0])
+        self.assertEqual(self.reactions(), [])            # no 👀 for a mention with the gate
 
-    def test_a_batch_the_chat_expects_an_answer_to_is_delivered_and_acknowledged(self):
+    def test_a_batch_the_chat_expects_an_answer_to_is_delivered_without_an_acknowledgement(self):
         self.scored(addressed=0.95, wants_reply=0.92)
         self.poll([self.m('m1', OTHER, 'Nduk, cek log', 0), self.m('m2', OTHER, 'yang staging', 1)], 2)
         out = self.poll([], 6)
         self.assertEqual(out[0]['meta']['gate'], 'reply')
         self.assertIn('yang staging', out[0]['content'])
-        self.assertEqual(self.reactions(), ['m2'])
+        self.assertEqual(self.reactions(), [])
         entry = self.log()[-1]
         self.assertEqual((entry['event'], entry['action'], entry['names']),
                          ('decision', 'reply', [f'{SPACE}/messages/m1', f'{SPACE}/messages/m2']))

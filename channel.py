@@ -121,7 +121,8 @@ def gate_instructions(gate: Gate) -> str:
         f'hold with fixed thresholds. It stops you joining in unasked while you wrote more than '
         f'{int(GATE_MAX_SHARE * 100)}% of the last {GATE_SHARE_WINDOW} messages, unless the space sets its own share. '
         'The operator may also turn reactions off in a space, since they show as the account the channel signs in '
-        'with, and then it adds none, the acknowledgement included. '
+        'with, and then it adds none. The gate puts no emoji on a message it passes to you, so nobody sees that '
+        'you started: when answering takes more than a quick look, say in a short message what you are doing first. '
         'A message that mentions or quotes you reaches you without Jev judging it, though it can be part of what Jev reads later. You yourself are a Claude model in a Claude Code session, '
         'and your replies are written by you, not by Jev. If you are asked about something this does not cover, such '
         'as the exact thresholds, say you do not know.'
@@ -179,8 +180,8 @@ GATE_RETRY = datetime.timedelta(seconds=30)
 # config may set 'max_share' of the last GATE_SHARE_WINDOW messages. It may also
 # set 'reactions' to false, and 'norms', the operator's description of how the
 # space works, which Jev reads. Reactions can only be made as the signed-in
-# user, so in a space with other people every emoji, the 👀 acknowledgement
-# included, shows as that person. 'reactions': false makes none there.
+# user, so in a space with other people every emoji shows as that person.
+# 'reactions': false makes none there.
 GATE_SHARE_WINDOW = 10
 GATE_MAX_SHARE = 0.3
 # An unasked reaction skips a message when one of this many before it got one.
@@ -872,7 +873,9 @@ class Channel:
             return []
         mention_only = bool(config.get('mention_only'))
         everything = not mention_only and not self.gate
-        acknowledged = [m for m, f in batch if not f.bot_sender and (f.addressed or everything)]
+        # With the gate the answer itself comes within seconds, and the session says
+        # when it is working on something longer, so a 👀 on each one is only noise.
+        acknowledged = [] if self.gate else [m for m, f in batch if not f.bot_sender and (f.addressed or everything)]
         return [self._delivery(chat, creds, space_name, config, state, operator, now, batch, acknowledged,
                                presence=mention_only and not self.gate)]
 
@@ -964,7 +967,7 @@ class Channel:
         state.pending, state.judged = [], None
         if action in (REPLY, INTERJECT):
             return [self._delivery(chat, creds, space_name, config, state, operator, now, batch,
-                                   acknowledged=[batch[-1][0]] if action == REPLY else [], gate=action,
+                                   acknowledged=[], gate=action,
                                    gate_reason=decision.reason if action == INTERJECT else '')]
         if action == REACT:
             self._acknowledge(chat, batch[-1][0], decision.emoji)
