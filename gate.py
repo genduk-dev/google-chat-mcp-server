@@ -17,6 +17,7 @@ about it, and the rule in decide() turns the answers into one action.
 import dataclasses
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -55,10 +56,13 @@ def questions(name: str) -> Dict:
             'criteria': {'agent': f'{name}.', 'person': 'A specific other person.',
                          'group': 'The whole group.', 'nobody': 'Nobody in particular, such as a reaction or small talk.'},
         },
+        # Without the last clause, work questions tagged to a colleague scored as
+        # open problems for the agent in a replay of a work space.
         'could_help': {
             'type': 'noul',
             'instructions': ('Is there an open question or problem in the recent conversation that nobody has answered '
-                             f'yet and that {name}, as described, could help with?'),
+                             f'yet and that {name}, as described, could help with? A question that mentions or names '
+                             'someone is for them, unless the conversation description says anyone may answer.'),
         },
         # A yes/no "would it feel natural to join" came out near 0.9 for every chat in
         # the probe, a private one included. Graded levels tell them apart.
@@ -95,6 +99,8 @@ class Message:
     from_bot: bool = False
     mentions_agent: bool = False
     replies_to_agent: bool = False
+    # It @-mentions someone other than the agent.
+    mentions_others: bool = False
     new: bool = False
     # What the agent did about this message: 'stayed_silent' or 'reacted'.
     agent_action: str = ''
@@ -104,7 +110,7 @@ class Message:
         for key in ('thread', 'agent_action'):
             if getattr(self, key):
                 out[key] = getattr(self, key)
-        for key in ('from_agent', 'from_bot', 'mentions_agent', 'replies_to_agent', 'new'):
+        for key in ('from_agent', 'from_bot', 'mentions_agent', 'replies_to_agent', 'mentions_others', 'new'):
             if getattr(self, key):
                 out[key] = True
         return out
@@ -122,7 +128,6 @@ class Policy:
     react: float = 0.8
     personal: float = 0.5
     interject_quiet: float = 30.0
-    interject_cooldown: float = 900.0
 
     @classmethod
     def from_env(cls, name: str, env=os.environ) -> 'Policy':
@@ -140,8 +145,7 @@ class Policy:
                    join=number('CHANNEL_GATE_JOIN', cls.join),
                    react=number('CHANNEL_GATE_REACT', cls.react),
                    personal=number('CHANNEL_GATE_PERSONAL', cls.personal),
-                   interject_quiet=number('CHANNEL_GATE_INTERJECT_QUIET', cls.interject_quiet),
-                   interject_cooldown=number('CHANNEL_GATE_INTERJECT_COOLDOWN', cls.interject_cooldown))
+                   interject_quiet=number('CHANNEL_GATE_INTERJECT_QUIET', cls.interject_quiet))
 
 
 @dataclasses.dataclass
@@ -168,12 +172,25 @@ def shortcut(new: List[Message]) -> str:
     return ''
 
 
-def state(policy: Policy, kind: str, messages: List[Message]) -> Dict:
+# An empty message (an attachment alone) or one of custom emoji shortcodes only.
+TRIVIAL_RE = re.compile(r'^\s*(:[\w+-]+:\s*)*$')
+
+
+def trivial(new: List[Message]) -> bool:
+    """Nothing in the batch to judge, so it is held without asking Jev."""
+    return all(TRIVIAL_RE.match(m.text) for m in new)
+
+
+def state(policy: Policy, kind: str, messages: List[Message], norms: str = '') -> Dict:
+    """norms: how this conversation works, in the operator's words: what it is for, and
+    whether anyone may jump in. The same text tells two chats' questions apart."""
     agent = {'name': policy.name, 'description': policy.description}
     if policy.aliases:
         agent['nicknames'] = policy.aliases
-    return {'agent': agent, 'conversation': {'kind': kind},
-            'messages': [m.state() for m in messages]}
+    conversation = {'kind': kind}
+    if norms:
+        conversation['description'] = norms
+    return {'agent': agent, 'conversation': conversation, 'messages': [m.state() for m in messages]}
 
 
 def scores(answers: Dict) -> Dict:
@@ -266,12 +283,16 @@ class Gate:
         self.policy = policy
         self.jev = jev
 
-    def judge(self, kind: str, messages: List[Message]) -> Decision:
+    def judge(self, kind: str, messages: List[Message], norms: str = '') -> Decision:
         """The decision for the messages marked new, given the ones before them."""
-        bypass = shortcut([m for m in messages if m.new])
+        new = [m for m in messages if m.new]
+        bypass = shortcut(new)
         if bypass:
             return Decision(REPLY, bypass=bypass)
-        return decide(self.policy, scores(self.jev.ask(state(self.policy, kind, messages), questions(self.policy.name))))
+        if trivial(new):
+            return Decision(HOLD)
+        s = state(self.policy, kind, messages, norms)
+        return decide(self.policy, scores(self.jev.ask(s, questions(self.policy.name))))
 
 
 def from_env(name: str, env=os.environ) -> Optional[Gate]:

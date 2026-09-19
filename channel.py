@@ -149,6 +149,17 @@ ACK_EMOJI = '👀'
 # how long it waits after Jev failed before asking again.
 GATE_HISTORY = 12
 GATE_RETRY = datetime.timedelta(seconds=30)
+# Joining in unasked is held back by the bot's share of the conversation, like a
+# person who keeps from dominating a group, instead of by a clock: a fixed
+# cooldown left it silent through a lively chat it had joined once. A space's
+# config may set 'max_share' of the last GATE_SHARE_WINDOW messages. It may also
+# set 'reactions' to false, where an emoji on every "ok" would be noise, and
+# 'norms', the operator's description of how the space works, which Jev reads.
+GATE_SHARE_WINDOW = 10
+GATE_MAX_SHARE = 0.3
+# An unasked reaction skips a message when one of this many before it got one.
+GATE_REACTION_SPACING = 3
+GATE_CONFIG_KEYS = ('norms', 'max_share', 'reactions')
 
 
 class ChannelStore:
@@ -174,6 +185,12 @@ class ChannelStore:
 def mentions_bot(text: str) -> bool:
     """True when @BOT_NAME appears as a standalone token, case-insensitive (@genduk, not @gendukku)."""
     return re.search(rf'(?<![\w@])@{re.escape(BOT_NAME)}(?![\w-])', text, re.IGNORECASE) is not None
+
+
+def mentions_someone(msg: Dict) -> bool:
+    """An @-mention of a person, not @all. The bot is not a Chat user, so it is never one of them."""
+    return any(a.get('type') == 'USER_MENTION' and a.get('userMention', {}).get('user', {}).get('name')
+               for a in msg.get('annotations', []))
 
 
 def is_own(msg: Dict) -> bool:
@@ -266,12 +283,10 @@ class SpaceState:
     deliveries: List[datetime.datetime] = dataclasses.field(default_factory=list)
     # With the gate: the decision on the pending batch and the newest message it
     # covered, so a batch is judged once until it grows; when to ask again after
-    # Jev failed; when the bot last joined in unasked (chimed in, or reacted to
-    # what was not for it); and what it did about messages it did not deliver
-    # (message name -> 'stayed_silent' or 'reacted').
+    # Jev failed; and what it did about messages it did not deliver (message
+    # name -> 'stayed_silent' or 'reacted').
     judged: Optional[Tuple[str, Decision]] = None
     gate_retry_at: Optional[datetime.datetime] = None
-    last_joined: Optional[datetime.datetime] = None
     silent: Dict[str, str] = dataclasses.field(default_factory=dict)
 
     def is_active(self, at: datetime.datetime) -> bool:
@@ -588,8 +603,10 @@ class Channel:
         creds = self._creds()
         # Fails loudly on a wrong name or a space the user cannot read.
         space = _get_service('chat', 'v1', creds).spaces().get(name=space_name).execute()
-        config = {'allowed_senders': allowed_senders or None, 'mention_only': mention_only}
         spaces = self.store.load()
+        # The operator's gate settings are kept; watching again is not how they change.
+        kept = {k: v for k, v in spaces.get(space_name, {}).items() if k in GATE_CONFIG_KEYS}
+        config = {'allowed_senders': allowed_senders or None, 'mention_only': mention_only, **kept}
         spaces[space_name] = config
         self.store.save(spaces)
         self.cursors[space_name] = self._now()
@@ -821,10 +838,11 @@ class Channel:
         grows, then delivered, reacted to, chimed in on, or held back.
 
         Chiming in waits longer than a reply, so a person can answer first: a new
-        message grows the batch and it is judged again. Joining in unasked, by
-        chiming in or by reacting to what was not for the bot, happens at most once
-        per cooldown. A failed call leaves the batch waiting and is retried after
-        GATE_RETRY.
+        message grows the batch and it is judged again. Joining in unasked is held
+        back where the bot already has its share of the conversation (see
+        GATE_MAX_SHARE), and so is an emoji where the space turned reactions off or
+        the bot just reacted. A failed call leaves the batch waiting and is retried
+        after GATE_RETRY.
         """
         if not state.pending:
             return []
@@ -835,7 +853,7 @@ class Channel:
         if not state.judged or state.judged[0] != newest:
             if state.gate_retry_at and now < state.gate_retry_at:
                 return []
-            decision = self._judge(creds, space_name, state, now)
+            decision = self._judge(creds, space_name, config, state, now)
             if not decision:
                 state.gate_retry_at = now + GATE_RETRY
                 return []
@@ -844,14 +862,16 @@ class Channel:
         decision = state.judged[1]
         action = decision.action
         policy = self.gate.policy
-        unasked = action == INTERJECT or (action == REACT and decision.scores['addressed'] < policy.reply)
-        if unasked:
-            if state.last_joined and (now - state.last_joined).total_seconds() < policy.interject_cooldown:
+        if action == INTERJECT:
+            if self._has_its_share(config, state):
                 action = HOLD
-            elif action == INTERJECT and quiet.total_seconds() < policy.interject_quiet:
+            elif quiet.total_seconds() < policy.interject_quiet:
                 return []
-            else:
-                state.last_joined = now
+        elif action == REACT and decision.scores['addressed'] < policy.reply:
+            recent = [m['name'] for m in state.buffer if m['name'] not in {p[0]['name'] for p in state.pending}]
+            if config.get('reactions') is False or any(
+                    state.silent.get(name) == 'reacted' for name in recent[-GATE_REACTION_SPACING:]):
+                action = HOLD
         batch = [(m, f) for m, f, _ in state.pending]
         state.pending, state.judged = [], None
         if action in (REPLY, INTERJECT):
@@ -864,12 +884,20 @@ class Channel:
             state.silent[msg['name']] = 'reacted' if action == REACT else 'stayed_silent'
         return []
 
-    def _judge(self, creds, space_name: str, state: SpaceState, now: datetime.datetime) -> Optional[Decision]:
+    @staticmethod
+    def _has_its_share(config: Dict, state: SpaceState) -> bool:
+        """The bot wrote more than its share of the recent messages in the space."""
+        recent = state.buffer[-GATE_SHARE_WINDOW:]
+        own = sum(1 for m in recent if is_own(m))
+        return own > config.get('max_share', GATE_MAX_SHARE) * GATE_SHARE_WINDOW
+
+    def _judge(self, creds, space_name: str, config: Dict, state: SpaceState,
+               now: datetime.datetime) -> Optional[Decision]:
         """Ask the gate about the pending batch, logging the decision or the failure."""
         messages = self._gate_messages(creds, state, now)
         started = self._clock()
         try:
-            decision = self.gate.judge('group', messages)
+            decision = self.gate.judge('group', messages, config.get('norms', ''))
         except JevError as e:
             logger.error("The gate could not judge %s: %s", space_name, e)
             self._gate_log({'event': 'error', 'space': space_name, 'error': str(e)})
@@ -902,7 +930,7 @@ class Channel:
                 from_bot=msg.get('sender', {}).get('type') == 'BOT',
                 mentions_agent=flags.mentioned if flags else (not own and mentions_bot(msg.get('text') or '')),
                 replies_to_agent=flags.replying_to_bot if flags else quoted in state.bot_messages,
-                new=flags is not None, agent_action=state.silent.get(msg['name'], ''))
+                mentions_others=mentions_someone(msg), new=flags is not None, agent_action=state.silent.get(msg['name'], ''))
         return ([gate_message(m, None) for m in history]
                 + [gate_message(m, f) for m, f, _ in state.pending])
 

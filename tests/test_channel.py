@@ -990,23 +990,54 @@ class GatedSpaceTest(SpaceCase):
         out = self.poll([], 31)
         self.assertEqual((out[0]['meta']['gate'], out[0]['meta']['gate_reason']), ('interject', 'join'))
 
-    def test_a_joke_gets_a_laugh_and_joining_in_unasked_shares_one_cooldown(self):
+    def test_a_joke_gets_a_laugh_unless_the_bot_just_reacted_or_the_space_turned_reactions_off(self):
         self.scored(natural_to_join=0.5, reaction='laugh', reaction_p=0.9)
         self.poll([self.m('m1', OTHER, 'wkwk', 0)], 1)
-        self.assertEqual(self.poll([], 5), [])
+        self.poll([], 5)
+        self.poll([self.m('m2', OTHER, 'wkwkwk', 10)], 10)
+        self.poll([], 15)
+        self.assertEqual(self.reactions(), ['m1'])       # one reaction in the last three is enough
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True, 'reactions': False}})
+        for i, sec in enumerate(range(20, 60, 10)):
+            self.poll([self.m(f'n{i}', OTHER, 'wkwk', sec)], sec)
+            self.poll([], sec + 5)
         self.assertEqual(self.reactions(), ['m1'])
-        self.scored(could_help=0.95)
-        self.poll([self.m('m2', OTHER, 'build lambat kenapa ya', 60)], 60)
-        self.assertEqual(self.poll([], 95), [])           # within the cooldown the laugh started
-        self.assertEqual(self.ch.states[SPACE].silent[f'{SPACE}/messages/m2'], 'stayed_silent')
 
-    def test_chiming_in_again_waits_for_the_cooldown(self):
-        self.scored(could_help=0.95)
-        self.poll([self.m('m1', OTHER, 'kenapa build lambat?', 0)], 1)
-        self.assertEqual(len(self.poll([], 31)), 1)
-        self.poll([self.m('m2', OTHER, 'deploy juga lambat', 100)], 100)
-        self.assertEqual(self.poll([], 140), [])
-        self.assertEqual(self.ch.states[SPACE].silent[f'{SPACE}/messages/m2'], 'stayed_silent')
+    def test_chiming_in_stops_once_the_bot_has_its_share_of_the_talk(self):
+        self.scored(natural_to_join=0.95)
+        chatter = [self.m(f'c{i}', OTHER, 'seru', i) for i in range(6)]
+        mine = [self.own(f'b{i}', 'wkwk', 10 + i) for i in range(4)]
+        self.poll(chatter + mine, 20)
+        self.poll([self.m('m1', OTHER, 'lanjut', 30)], 30)
+        self.assertEqual(self.poll([], 70), [])          # 4 of the last 10 are the bot's
+        self.poll([self.m(f'd{i}', OTHER, 'lagi', 80 + i) for i in range(6)], 90)
+        self.assertEqual(self.poll([], 130)[0]['meta']['gate_reason'], 'join')   # 3 of 10 now
+
+    def test_the_space_norms_and_mentions_of_others_reach_jev(self):
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True, 'norms': 'A casual AI chat.'}})
+        tagged = self.m('m1', OTHER, '@Husni COD brp?', 0, annotations=[
+            {'type': 'USER_MENTION', 'userMention': {'user': {'name': OWNER}}}])
+        everyone = self.m('m2', OTHER, '@all rilis jam 3', 1, annotations=[
+            {'type': 'USER_MENTION', 'userMention': {'user': {}}}])
+        self.poll([tagged, everyone], 2)
+        self.poll([], 6)
+        s = self.jev.ask.call_args.args[0]
+        self.assertEqual(s['conversation'], {'kind': 'group', 'description': 'A casual AI chat.'})
+        self.assertEqual([m.get('mentions_others') for m in s['messages']], [True, None])
+
+    def test_an_emoji_or_an_attachment_alone_is_held_without_asking_jev(self):
+        self.poll([self.m('m1', OTHER, ':sungkem-ndlosor-kiri:', 0), self.m('m2', OTHER, '', 1)], 2)
+        self.assertEqual(self.poll([], 6), [])
+        self.jev.ask.assert_not_called()
+
+    def test_watching_again_keeps_the_gate_settings(self):
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True, 'norms': 'work', 'max_share': 0.1,
+                                 'reactions': False, 'muted_until': ts(900)}})
+        self.chat.spaces().get.return_value.execute.return_value = {'displayName': 'DINO'}
+        with mock.patch.object(self.ch, '_clock', return_value=at(0)):
+            self.ch.watch(SPACE, None, False)
+        self.assertEqual(self.store.load()[SPACE], {'allowed_senders': None, 'mention_only': False, 'norms': 'work',
+                                                    'max_share': 0.1, 'reactions': False})
 
     def test_jev_failing_leaves_the_batch_waiting_and_logged(self):
         from gate import JevError
