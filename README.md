@@ -120,6 +120,39 @@ conversation or you tell it to keep quiet (`mute_space`). Attachments of
 delivered messages are saved in `attachments/` beside the channel state and
 deleted after a week.
 
+### A classifier gate instead of mentions (experimental)
+
+With `CHANNEL_GATE=jev`, no space needs a mention and `mention_only` has no
+effect. A mention or a quote reply to the bot still arrives at once. Every
+other batch, once the chat pauses, goes to TypeSafe's Jev decision model
+(`typesafe/jev-1.13` through OpenRouter by default), which decides whether the
+session answers, reacts with an emoji, joins in unasked, or stays out.
+
+| Variable | Meaning |
+| --- | --- |
+| `CHANNEL_GATE` | `rules` (the default, mentions and presence) or `jev` |
+| `CHANNEL_GATE_DESCRIPTION` | Who the bot is in the chat, which is all Jev knows about it. Required |
+| `CHANNEL_GATE_KEY_FILE` or `OPENROUTER_API_KEY` | The API key. A file keeps it out of the environment the session's own shell inherits |
+| `CHANNEL_GATE_ALIASES` | Comma-separated nicknames people call the bot by |
+| `CHANNEL_GATE_MODEL`, `CHANNEL_GATE_URL` | Another model, or TypeSafe's own endpoint |
+| `CHANNEL_GATE_REPLY`, `_INTERJECT`, `_JOIN`, `_REACT`, `_PERSONAL`, `_INTERJECT_QUIET` | Thresholds, see `gate.py` |
+| `CHANNEL_TIMEZONE` | The zone delivery times are written in, for example `Asia/Jakarta` (any mode) |
+
+Each space in the channel state file may also set, by hand:
+
+- `norms`: how the space works, in your words ("casual, anyone may jump in",
+  or "work only"). Jev reads it, and it changes the result more than any
+  threshold.
+- `max_share`: the bot joins in unasked only while it wrote at most this
+  share of the last ten messages (default 0.3).
+- `reactions`: `false` stops emoji on messages that were not for the bot.
+
+Know what it sends: the new messages and up to twelve before them, cut to 400
+characters each, with sender names, plus the bot's description and the
+space's norms. Every decision goes to `gate_log.jsonl` beside the state, with
+that text. Reactions, the gate's and the 👀 acknowledgement, are made with
+the signed-in user's own account, so in a space they show as that person.
+
 **Always start that config with the flag, and on one machine only.**
 
 - `--channel` is what starts the poller. The Claude Code flag is what makes

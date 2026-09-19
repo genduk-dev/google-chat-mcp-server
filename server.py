@@ -720,8 +720,10 @@ def run_channel(args) -> None:
         hung and a standby session takes over within a poll), and each watched space with
         its allowed senders (null means everyone in the space), its mention_only setting,
         left_at and muted_until when set, and for a mention_only space on the polling
-        session its presence, active or idle. The bot name comes from the BOT_NAME env var
-        and cannot be changed by a tool."""
+        session its presence, active or idle. gate is "jev" when a classifier decides
+        what reaches the session instead of mentions and presence; a space may then also
+        show the operator's norms, max_share and reactions settings. The bot name comes
+        from the BOT_NAME env var and cannot be changed by a tool."""
         return _json(channel.list_watched())
 
     # On the event loop, like the poller that reads the same state.

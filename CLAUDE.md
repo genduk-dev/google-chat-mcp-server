@@ -13,6 +13,10 @@ sign-in, and optionally runs as a Claude Code channel. A personal fork of
 - `channel.py`: the channel. Watched spaces, the poller and its lease, the
   cursors, presence in mention-only spaces, batching, the context and
   attachments a delivery carries, edits, and the permission relay.
+- `gate.py`: the Jev classifier gate that replaces mentions and presence with
+  `CHANNEL_GATE=jev`. It knows nothing about Google Chat, so its rules can run
+  behind another chat network; `channel.py` maps messages to it and acts on
+  its decision.
 - `server_auth.py`, `auth_cli.py`: sign-in outside an agent, from upstream.
 - `tests/`: unit tests, no network.
 
