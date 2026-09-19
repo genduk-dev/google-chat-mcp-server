@@ -918,5 +918,129 @@ class PollerLockTest(unittest.TestCase):
             self.assertEqual((status['holder_pid'], status['stale']), (None, True))
 
 
+class GatedSpaceTest(SpaceCase):
+    """A space behind the Jev gate, with Jev faked. SpaceCase watches it mention_only;
+    test_mention_only_does_not_matter_behind_the_gate checks the other setting."""
+
+    def setUp(self):
+        super().setUp()
+        from gate import Gate, Policy
+        from tests.test_gate import answers
+        self.answers = answers
+        self.jev = mock.MagicMock()
+        self.jev.ask.return_value = answers()
+        self.ch.gate = Gate(Policy(name='Genduk', description='An engineering assistant.'), self.jev)
+
+    def scored(self, **s):
+        self.jev.ask.return_value = self.answers(**s)
+
+    def log(self):
+        return [json.loads(line) for line in self.ch.gate_log_path.read_text().splitlines()]
+
+    def test_a_mention_is_delivered_at_once_without_asking_jev(self):
+        out = self.poll([self.m('m1', OTHER, '@genduk cek staging', 0)], 1)
+        self.assertEqual(out[0]['meta']['mentioned'], 'true')
+        self.assertNotIn('presence', out[0]['meta'])
+        self.jev.ask.assert_not_called()
+
+    def test_small_talk_is_held_and_reaches_the_session_later_as_context(self):
+        self.assertEqual(self.poll([self.m('m1', OTHER, 'makan di mana?', 0)], 1), [])
+        self.assertEqual(self.poll([], 5), [])
+        self.jev.ask.assert_called_once()
+        self.assertEqual(self.ch.states[SPACE].silent, {f'{SPACE}/messages/m1': 'stayed_silent'})
+        self.assertFalse(self.ch.busy())
+        out = self.poll([self.m('m2', OTHER, '@genduk kamu?', 10)], 10)
+        self.assertIn('makan di mana?', out[0]['content'].split('New:')[0])
+
+    def test_a_batch_the_chat_expects_an_answer_to_is_delivered_and_acknowledged(self):
+        self.scored(addressed=0.95, wants_reply=0.92)
+        self.poll([self.m('m1', OTHER, 'Nduk, cek log', 0), self.m('m2', OTHER, 'yang staging', 1)], 2)
+        out = self.poll([], 6)
+        self.assertEqual(out[0]['meta']['gate'], 'reply')
+        self.assertIn('yang staging', out[0]['content'])
+        self.assertEqual(self.reactions(), ['m2'])
+        entry = self.log()[-1]
+        self.assertEqual((entry['event'], entry['action'], entry['names']),
+                         ('decision', 'reply', [f'{SPACE}/messages/m1', f'{SPACE}/messages/m2']))
+
+    def test_thanks_gets_a_reaction_and_no_turn(self):
+        self.scored(addressed=0.96, wants_reply=0.2)
+        self.poll([self.m('m1', OTHER, 'mantap makasih', 0)], 1)
+        self.assertEqual(self.poll([], 5), [])
+        call = self.chat.spaces().messages().reactions().create.call_args
+        self.assertEqual((call.kwargs['parent'], call.kwargs['body']),
+                         (f'{SPACE}/messages/m1', {'emoji': {'unicode': channel.REACT_EMOJI}}))
+
+    def test_chiming_in_waits_for_a_longer_pause_and_starts_over_when_someone_speaks(self):
+        self.scored(could_help=0.95, wants_reply=0.5)
+        self.poll([self.m('m1', OTHER, 'CI merah, ada yang tau?', 0)], 1)
+        self.assertEqual(self.poll([], 5), [])            # judged: chime in, after 30 s of quiet
+        self.assertEqual(self.poll([], 20), [])
+        self.poll([self.m('m2', OWNER, 'coba rerun', 25)], 25)
+        self.assertEqual(self.poll([], 30), [])           # judged again: the batch grew
+        self.assertEqual(self.jev.ask.call_count, 2)
+        self.assertEqual(self.poll([], 50), [])
+        out = self.poll([], 56)
+        self.assertEqual(out[0]['meta']['gate'], 'interject')
+        self.assertEqual(self.reactions(), [])            # nobody asked, so nothing to acknowledge
+
+    def test_chiming_in_again_waits_for_the_cooldown(self):
+        self.scored(could_help=0.95)
+        self.poll([self.m('m1', OTHER, 'kenapa build lambat?', 0)], 1)
+        self.assertEqual(len(self.poll([], 31)), 1)
+        self.poll([self.m('m2', OTHER, 'deploy juga lambat', 100)], 100)
+        self.assertEqual(self.poll([], 140), [])
+        self.assertEqual(self.ch.states[SPACE].silent[f'{SPACE}/messages/m2'], 'stayed_silent')
+
+    def test_jev_failing_leaves_the_batch_waiting_and_logged(self):
+        from gate import JevError
+        self.jev.ask.side_effect = JevError('Jev answered 503')
+        self.poll([self.m('m1', OTHER, 'Nduk?', 0)], 1)
+        self.assertEqual(self.poll([], 5), [])
+        self.assertEqual(self.poll([], 20), [])           # not asked again before GATE_RETRY
+        self.assertEqual(self.jev.ask.call_count, 1)
+        self.assertEqual(self.log()[-1]['event'], 'error')
+        self.jev.ask.side_effect = None
+        self.scored(addressed=0.9, wants_reply=0.9)
+        self.assertEqual(self.poll([], 36)[0]['meta']['gate'], 'reply')
+
+    def test_jev_reads_the_bot_s_own_reply_and_what_it_held(self):
+        self.poll([self.m('m1', OTHER, 'lunch?', 0)], 1)
+        self.poll([], 5)
+        self.poll([self.m('m2', OTHER, '@genduk deploy sukses?', 10)], 10)
+        self.poll([self.own('b1', 'Sukses.', 20)], 20)
+        self.poll([self.m('m3', OTHER, 'terus staging?', 30)], 30)
+        self.poll([], 35)
+        messages = self.jev.ask.call_args.args[0]['messages']
+        self.assertEqual([(m['sender'], m.get('assistant_action'), m.get('from_assistant'), m.get('new')) for m in messages],
+                         [('Budi', 'stayed_silent', None, None), ('Budi', None, None, None),
+                          ('Genduk', None, True, None), ('Budi', None, None, True)])
+        self.assertTrue(messages[1]['mentions_assistant'])
+        self.assertEqual(messages[-1]['ago_seconds'], 5)
+
+    def test_leaving_holds_back_all_but_mentions_for_ten_minutes(self):
+        with mock.patch.object(self.ch, '_clock', return_value=at(0)):
+            self.ch.leave(SPACE)
+        self.poll([self.m('m1', OTHER, 'Nduk?', 1)], 1)
+        self.assertEqual(self.poll([], 10), [])
+        self.jev.ask.assert_not_called()
+        self.assertEqual(len(self.poll([self.m('m2', OTHER, '@genduk hi', 20)], 20)), 1)
+        self.poll([self.m('m3', OTHER, 'Nduk, lagi?', 601)], 601)
+        self.poll([], 606)
+        self.jev.ask.assert_called_once()
+
+    def test_mention_only_does_not_matter_behind_the_gate(self):
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': False}})
+        self.assertEqual(self.poll([self.m('m1', OWNER, 'catatan buat diri sendiri', 0)], 1), [])
+        self.assertEqual(self.poll([], 5), [])
+        self.jev.ask.assert_called_once()
+        self.assertEqual(self.reactions(), [])
+
+    def test_list_watched_names_the_gate(self):
+        self.ch.active = True
+        self.assertEqual(self.ch.list_watched()['gate'], 'jev')
+        self.assertNotIn('presence', self.ch.list_watched()['spaces'][0])
+
+
 if __name__ == '__main__':
     unittest.main()

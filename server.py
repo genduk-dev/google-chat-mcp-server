@@ -651,11 +651,15 @@ def run_channel(args) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
     from mcp.shared.message import SessionMessage
-    from channel import Channel, ChannelStore, INSTRUCTIONS, PERMISSION_REQUEST_METHOD
+    from channel import Channel, ChannelStore, GATE_INSTRUCTIONS, INSTRUCTIONS, PERMISSION_REQUEST_METHOD
+    from gate import from_env as gate_from_env
+    from google_chat import BOT_NAME
 
     app = FastMCP("Google Chat") if args.channel_only else mcp
     state_path = Path(args.channel_state_path or Path(args.token_path).parent / 'channel_state.json')
-    channel = Channel(ChannelStore(state_path), args.poll_seconds)
+    # A bad CHANNEL_GATE setup fails the start rather than running on the rules unasked.
+    gate = gate_from_env(BOT_NAME)
+    channel = Channel(ChannelStore(state_path), args.poll_seconds, gate=gate)
 
     def watch_space(space_name: str, allowed_senders: List[str] = None, mention_only: bool = False) -> str:
         """Start pushing new messages from a Google Chat space into this Claude Code session,
@@ -669,7 +673,8 @@ def run_channel(args) -> None:
         addressed it for 10 minutes, or for an hour at most. Calling again replaces
         both settings, so pass the current allowed_senders when you only want to
         change mention_only. Takes effect on the next poll; history before this call
-        is never replayed.
+        is never replayed. When list_watched_spaces reports gate "jev", mention_only
+        has no effect: a classifier decides which messages reach you in every space.
 
         Args:
             space_name: The space to watch (format: 'spaces/SPACE_ID')
@@ -724,7 +729,7 @@ def run_channel(args) -> None:
         app.tool(fn, output_schema=None, run_in_thread=False)
 
     server = app._mcp_server
-    server.instructions = INSTRUCTIONS
+    server.instructions = INSTRUCTIONS + (GATE_INSTRUCTIONS if gate else '')
     # Permission relay is safe to offer: only the operator can answer.
     options = server.create_initialization_options(
         experimental_capabilities={'claude/channel': {}, 'claude/channel/permission': {}})

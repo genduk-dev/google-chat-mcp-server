@@ -15,6 +15,12 @@ In a mention_only space the bot behaves like a person who was pinged: idle
 until someone addresses it, then present in the space, reading everything,
 until the conversation moves on (see SpaceState). What it knows about each
 space for that lives in the poller's memory only, so a restart starts idle.
+
+With CHANNEL_GATE=jev no space has presence, and mention_only means nothing.
+In every watched space a mention or a quote reply still arrives at once, and
+every other batch goes to the gate
+(gate.py), which asks Jev whether to deliver it, react to it, chime in on it,
+or hold it back. What it held back reaches the session later as context.
 """
 import contextlib
 import copy
@@ -33,6 +39,7 @@ import anyio
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 
+from gate import HOLD, INTERJECT, REACT, REPLY, Decision, Gate, JevError, Message as GateMessage
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, AttachmentTooLarge, get_credentials,
                          get_user_display_name, message_text, save_attachment, space_display_name,
                          self_user_id, send_space_message, update_message, write_private, _get_service,
@@ -82,6 +89,18 @@ INSTRUCTIONS = (
     'or what it means, or adds a request; a fixed typo needs nothing.'
 )
 
+# Appended to INSTRUCTIONS when CHANNEL_GATE=jev.
+GATE_INSTRUCTIONS = (
+    ' This channel runs a classifier gate in every watched space, in place of mention_only and presence: a mention or '
+    'a quote reply to you still arrives at once, and any other message arrives only when the gate '
+    'lets it through. Such a delivery carries gate="reply" when the gate judged that the chat expects '
+    'your answer, or gate="interject" when nobody asked you but there is an open question you may be '
+    'able to help with. With gate="interject", speak only when you have a concrete contribution, in '
+    'one short message, and stay silent when in doubt. What the gate held back reaches you later '
+    'under "Earlier". leave_conversation holds back everything but mentions and quote replies there '
+    'for 10 minutes.'
+)
+
 # A takeover resumes from saved cursors only if the previous poller saved them
 # this recently. Older ones mean no channel session was running, and replaying
 # that backlog would flood the new session with messages nobody asked it to handle.
@@ -124,6 +143,12 @@ CONTEXT_CHARS = 4000
 ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
 ATTACHMENT_TTL = datetime.timedelta(days=7)
 ACK_EMOJI = '👀'
+# The gate's answer to thanks or an ok addressed to the bot, instead of a turn.
+REACT_EMOJI = '👍'
+# With the gate: the recent messages Jev reads before the batch it judges, and
+# how long it waits after Jev failed before asking again.
+GATE_HISTORY = 12
+GATE_RETRY = datetime.timedelta(seconds=30)
 
 
 class ChannelStore:
@@ -239,6 +264,14 @@ class SpaceState:
     # Unaddressed messages waiting for the chat to pause: (message, flags, when queued).
     pending: List[Tuple[Dict, Flags, datetime.datetime]] = dataclasses.field(default_factory=list)
     deliveries: List[datetime.datetime] = dataclasses.field(default_factory=list)
+    # With the gate: the decision on the pending batch and the newest message it
+    # covered, so a batch is judged once until it grows; when to ask again after
+    # Jev failed; when the bot last chimed in; and what it did about messages it
+    # did not deliver (message name -> 'stayed_silent' or 'reacted').
+    judged: Optional[Tuple[str, Decision]] = None
+    gate_retry_at: Optional[datetime.datetime] = None
+    last_interject: Optional[datetime.datetime] = None
+    silent: Dict[str, str] = dataclasses.field(default_factory=dict)
 
     def is_active(self, at: datetime.datetime) -> bool:
         return (self.active_since is not None and at - self.last_addressed < PRESENCE_IDLE
@@ -252,6 +285,7 @@ class SpaceState:
     def go_idle(self) -> None:
         self.active_since = self.last_addressed = None
         self.pending.clear()
+        self.judged = None
 
     def remember(self, msg: Dict) -> None:
         self.buffer = [m for m in self.buffer if m['name'] != msg['name']] + [msg]
@@ -262,6 +296,8 @@ class SpaceState:
             for key in [k for k, t in table.items() if now - t >= MEMORY_WINDOW]:
                 del table[key]
         self.fetched = dict(list(self.fetched.items())[-BUFFER_MAX:])
+        kept = {m['name'] for m in self.buffer}
+        self.silent = {name: action for name, action in self.silent.items() if name in kept}
         self.deliveries = [t for t in self.deliveries if now - t < datetime.timedelta(hours=1)]
 
 
@@ -307,7 +343,7 @@ def permission_prompt(params: Dict) -> str:
 
 def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool = False,
                     space_title: str = '', flags: Optional[Flags] = None, presence: bool = False,
-                    content: Optional[str] = None) -> Dict:
+                    content: Optional[str] = None, gate: str = '') -> Dict:
     """Build notification params. Meta keys must be identifiers or Claude Code drops them.
 
     content defaults to the message's own text with its attachments' names.
@@ -330,6 +366,8 @@ def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool =
         meta.update(flags.meta())
     if presence:
         meta['presence'] = 'active'
+    if gate:
+        meta['gate'] = gate
     if content is None:
         content = _body(msg)
         names = [a.get('contentName') for a in msg.get('attachment', []) if a.get('contentName')]
@@ -339,9 +377,13 @@ def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool =
 
 
 class Channel:
-    def __init__(self, store: ChannelStore, poll_seconds: float):
+    def __init__(self, store: ChannelStore, poll_seconds: float, gate: Optional[Gate] = None):
         self.store = store
         self.poll_seconds = poll_seconds
+        # None: mention_only spaces use presence. A Gate: they use the gate.
+        self.gate = gate
+        # Every gate decision and error, one JSON object a line, to tune the gate by.
+        self.gate_log_path = store.path.with_name('gate_log.jsonl')
         self.lease_path = store.path.with_name('channel.lease')
         # Held only while the lease is read and written, so two standbys cannot
         # both take a stale lease. Not channel.lock: older versions hold that
@@ -592,10 +634,10 @@ class Channel:
         for s, config in self.store.load().items():
             entry = {'space_name': s, **config}
             state = self.states.get(s)
-            if config.get('mention_only') and self.active:
+            if config.get('mention_only') and self.active and not self.gate:
                 entry['presence'] = 'active' if state and state.is_active(now) else 'idle'
             spaces.append(entry)
-        return {'bot_name': BOT_NAME, 'mention': f'@{BOT_NAME}',
+        return {'bot_name': BOT_NAME, 'mention': f'@{BOT_NAME}', 'gate': 'jev' if self.gate else 'rules',
                 'message_id_prefix': APP_MESSAGE_PREFIX,
                 'poller': self.poller_status(),
                 'spaces': spaces}
@@ -653,6 +695,12 @@ class Channel:
             state.go_idle()
 
     @staticmethod
+    def _left_recently(config: Dict, now: datetime.datetime) -> bool:
+        """With the gate, leaving holds back what does not address the bot for PRESENCE_IDLE."""
+        left_at = config.get('left_at')
+        return bool(left_at) and now - _parse_time(left_at) < PRESENCE_IDLE
+
+    @staticmethod
     def _muted(config: Dict, now: datetime.datetime) -> bool:
         until = config.get('muted_until')
         return bool(until) and _parse_time(until) > now
@@ -690,6 +738,9 @@ class Channel:
             state.seen[msg['name']] = state.bot_messages[msg['name']] = now
             if state.is_active(at):
                 state.last_addressed = at  # the bot speaking keeps its presence going
+            if self.gate:
+                self._gate_log({'event': 'bot_message', 'space': msg['name'].split('/messages/')[0],
+                                'message': msg['name']})
             return
         if not sender_allowed(msg, config.get('allowed_senders')):
             return
@@ -697,7 +748,19 @@ class Channel:
         flags = self._flags(chat, state, msg, operator)
         if self._muted(config, now) and not (flags.operator and flags.addressed):
             return
-        if not config.get('mention_only'):
+        if self.gate:
+            if flags.addressed:
+                state.address(at)
+                direct.append((msg, flags))
+                return
+            if flags.bot_sender or self._left_recently(config, now):
+                return
+            if len(state.deliveries) >= HOURLY_DELIVERIES:
+                logger.warning("%d deliveries from %s in the last hour; the gate holds back the rest",
+                               len(state.deliveries), msg['name'].split('/messages/')[0])
+                return
+            state.pending.append((msg, flags, now))
+        elif not config.get('mention_only'):
             direct.append((msg, flags))
         elif flags.addressed:
             state.address(at)
@@ -714,6 +777,9 @@ class Channel:
                now: datetime.datetime, direct: List[Tuple[Dict, Flags]]) -> List[Dict]:
         """One delivery for this space: the messages delivered now, plus the queued
         ones once the chat paused, or with them."""
+        if self.gate and not direct:
+            return self._gated(chat, creds, space_name, config, state, operator, now)
+        state.judged = None  # a mention takes the batch the gate was judging with it
         batch = []
         if state.pending and (direct or now - state.pending[-1][2] >= BATCH_QUIET
                               or now - state.pending[0][2] >= BATCH_MAX):
@@ -723,20 +789,119 @@ class Channel:
         if not batch:
             return []
         mention_only = bool(config.get('mention_only'))
-        if mention_only:
+        everything = not mention_only and not self.gate
+        acknowledged = [m for m, f in batch if not f.bot_sender and (f.addressed or everything)]
+        return [self._delivery(chat, creds, space_name, config, state, operator, now, batch, acknowledged,
+                               presence=mention_only and not self.gate)]
+
+    def _delivery(self, chat, creds, space_name: str, config: Dict, state: SpaceState, operator: str,
+                  now: datetime.datetime, batch: List[Tuple[Dict, Flags]], acknowledged: List[Dict],
+                  presence: bool = False, gate: str = '') -> Dict:
+        """The notification for a batch, with the context it follows from. Marks all of it seen."""
+        if config.get('mention_only') or self.gate:
             state.deliveries.append(now)
         earlier, left_out = self._context(chat, config, state, batch)
-        for msg, flags in batch:
-            if not flags.bot_sender and (flags.addressed or not mention_only):
-                self._acknowledge(chat, msg)
+        for msg in acknowledged:
+            self._acknowledge(chat, msg)
         last, last_flags = batch[-1]
         notification = to_notification(
             last, space_name, get_user_display_name(last.get('sender', {}), creds),
-            space_title=self._space_title(space_name, creds), flags=last_flags, presence=mention_only,
-            content=self._content(creds, operator, batch, earlier, left_out))
+            space_title=self._space_title(space_name, creds), flags=last_flags, presence=presence,
+            content=self._content(creds, operator, batch, earlier, left_out), gate=gate)
         for msg in [m for m, _ in batch] + earlier:
             state.seen[msg['name']] = now
-        return [notification]
+        return notification
+
+    def _gated(self, chat, creds, space_name: str, config: Dict, state: SpaceState, operator: str,
+               now: datetime.datetime) -> List[Dict]:
+        """The pending batch of a gated space, once the chat paused: judged once until it
+        grows, then delivered, reacted to, chimed in on, or held back.
+
+        Chiming in waits longer than a reply, so a person can answer first: a new
+        message grows the batch and it is judged again. A failed call leaves the
+        batch waiting and is retried after GATE_RETRY.
+        """
+        if not state.pending:
+            return []
+        quiet = now - state.pending[-1][2]
+        if quiet < BATCH_QUIET and now - state.pending[0][2] < BATCH_MAX:
+            return []
+        newest = state.pending[-1][0]['name']
+        if not state.judged or state.judged[0] != newest:
+            if state.gate_retry_at and now < state.gate_retry_at:
+                return []
+            decision = self._judge(creds, space_name, state, now)
+            if not decision:
+                state.gate_retry_at = now + GATE_RETRY
+                return []
+            state.gate_retry_at = None
+            state.judged = (newest, decision)
+        action = state.judged[1].action
+        if action == INTERJECT:
+            policy = self.gate.policy
+            if state.last_interject and (now - state.last_interject).total_seconds() < policy.interject_cooldown:
+                action = HOLD
+            elif quiet.total_seconds() < policy.interject_quiet:
+                return []
+        batch = [(m, f) for m, f, _ in state.pending]
+        state.pending, state.judged = [], None
+        if action in (REPLY, INTERJECT):
+            if action == INTERJECT:
+                state.last_interject = now
+            return [self._delivery(chat, creds, space_name, config, state, operator, now, batch,
+                                   acknowledged=[batch[-1][0]] if action == REPLY else [], gate=action)]
+        if action == REACT:
+            self._acknowledge(chat, batch[-1][0], REACT_EMOJI)
+        for msg, _ in batch:
+            state.silent[msg['name']] = 'reacted' if action == REACT else 'stayed_silent'
+        return []
+
+    def _judge(self, creds, space_name: str, state: SpaceState, now: datetime.datetime) -> Optional[Decision]:
+        """Ask the gate about the pending batch, logging the decision or the failure."""
+        messages = self._gate_messages(creds, state, now)
+        started = self._clock()
+        try:
+            decision = self.gate.judge('group', messages)
+        except JevError as e:
+            logger.error("The gate could not judge %s: %s", space_name, e)
+            self._gate_log({'event': 'error', 'space': space_name, 'error': str(e)})
+            return None
+        self._gate_log({'event': 'decision', 'space': space_name, 'action': decision.action,
+                        'scores': decision.scores, 'ms': int((self._clock() - started).total_seconds() * 1000),
+                        'messages': [m.state() for m in messages],
+                        'names': [m['name'] for m, _, _ in state.pending]})
+        return decision
+
+    def _gate_messages(self, creds, state: SpaceState, now: datetime.datetime) -> List[GateMessage]:
+        """The pending batch as the gate reads it, after the recent messages it follows:
+        its threads', and the main flow's when it has main-flow messages."""
+        pending = {m['name']: f for m, f, _ in state.pending}
+        newest = max(m['createTime'] for m, _, _ in state.pending)
+        threads = {_thread(m) for m, _, _ in state.pending if m.get('threadReply')}
+        main_flow = any(not m.get('threadReply') for m, _, _ in state.pending)
+        history = [m for m in state.buffer
+                   if m['name'] not in pending and m['createTime'] < newest
+                   and (_thread(m) in threads or (main_flow and not m.get('threadReply')))][-GATE_HISTORY:]
+
+        def gate_message(msg: Dict, flags: Optional[Flags]) -> GateMessage:
+            own = is_own(msg)
+            quoted = msg.get('quotedMessageMetadata', {}).get('name', '')
+            return GateMessage(
+                sender=self.gate.policy.name if own else get_user_display_name(msg.get('sender', {}), creds),
+                text=_body(msg), ago_seconds=int((now - _parse_time(msg['createTime'])).total_seconds()),
+                thread=_thread(msg).split('/threads/')[-1], from_assistant=own,
+                from_bot=msg.get('sender', {}).get('type') == 'BOT',
+                mentions_assistant=flags.mentioned if flags else (not own and mentions_bot(msg.get('text') or '')),
+                replies_to_assistant=flags.replying_to_bot if flags else quoted in state.bot_messages,
+                new=flags is not None, assistant_action=state.silent.get(msg['name'], ''))
+        return ([gate_message(m, None) for m in history]
+                + [gate_message(m, f) for m, f, _ in state.pending])
+
+    def _gate_log(self, entry: Dict) -> None:
+        entry = {'at': self._now(), **entry}
+        fd = os.open(self.gate_log_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, 'a') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
     def _context(self, chat, config: Dict, state: SpaceState,
                  batch: List[Tuple[Dict, Flags]]) -> Tuple[List[Dict], int]:
@@ -849,11 +1014,11 @@ class Channel:
                 path.unlink(missing_ok=True)
 
     @staticmethod
-    def _acknowledge(chat, msg: Dict) -> None:
+    def _acknowledge(chat, msg: Dict, emoji: str = ACK_EMOJI) -> None:
         """React to a message addressed to the bot, so the sender knows it arrived."""
         try:
             chat.spaces().messages().reactions().create(
-                parent=msg['name'], body={'emoji': {'unicode': ACK_EMOJI}}).execute()
+                parent=msg['name'], body={'emoji': {'unicode': emoji}}).execute()
         except Exception:
             logger.exception("Reacting to %s failed", msg['name'])
 
@@ -907,7 +1072,8 @@ class Channel:
                         if self._muted(config, now) and not (flags.operator and flags.addressed):
                             continue
                         mention_only = bool(config.get('mention_only'))
-                        if mention_only and not (flags.addressed or state.is_active(at) or msg['name'] in state.seen):
+                        filtered = mention_only or self.gate is not None
+                        if filtered and not (flags.addressed or state.is_active(at) or msg['name'] in state.seen):
                             continue
                         # The version the session saw, so it can tell a typo fix from a
                         # changed request. Only the buffer has it; a fetch would return the edit.
@@ -916,7 +1082,7 @@ class Channel:
                         if before and _same_words(_body(before), _body(msg)):
                             state.remember(msg)
                             continue  # spacing or case only: nothing to reconsider
-                        if mention_only and flags.addressed:
+                        if filtered and flags.addressed:
                             state.address(at)
                         state.remember(msg)
                         state.seen[msg['name']] = now
@@ -926,7 +1092,8 @@ class Channel:
                             content = f"Before the edit:\n{_body(before)}\n\nAfter:\n{_body(msg)}"
                         out.append(to_notification(msg, space_name, sender_name, edited=True,
                                                    space_title=self._space_title(space_name, creds),
-                                                   flags=flags, presence=mention_only, content=content))
+                                                   flags=flags, presence=mention_only and not self.gate,
+                                                   content=content))
                 page_token = response.get('nextPageToken')
                 if not page_token:
                     break
