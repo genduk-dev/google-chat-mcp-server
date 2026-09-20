@@ -85,6 +85,26 @@ class ShortcutTest(unittest.TestCase):
         self.assertEqual(shortcut([Message('Genduk', 'see @genduk', 5, mentions_agent=True, from_agent=True, new=True)]), '')
 
 
+class TrivialTest(unittest.TestCase):
+    def gate(self):
+        jev = mock.MagicMock()
+        return Gate(POLICY, jev), jev
+
+    def test_emoji_shortcodes_alone_are_held_without_asking_jev(self):
+        g, jev = self.gate()
+        self.assertEqual(g.judge('group', [Message('Ana', ':tada: :fire:', 5, new=True)]).action, HOLD)
+        jev.ask.assert_not_called()
+
+    def test_a_voice_note_reaches_jev_rather_than_being_held(self):
+        # It has no text of its own; channel.body_with_attachments puts the
+        # attachment's name in, which is what keeps it out of trivial().
+        g, jev = self.gate()
+        jev.ask.return_value = answers(addressed=0.9, wants_reply=0.9)
+        d = g.judge('group', [Message('Ana', '[attachments: voice-note.ogg]', 5, new=True)])
+        jev.ask.assert_called_once()
+        self.assertEqual(d.action, REPLY)
+
+
 class QuestionsTest(unittest.TestCase):
     def test_the_questions_name_the_agent(self):
         self.assertIn('Genduk', QUESTIONS['addressed']['instructions'])

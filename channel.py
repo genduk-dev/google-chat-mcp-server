@@ -113,7 +113,7 @@ def gate_instructions(gate: Gate) -> str:
         f'messages, up to {GATE_HISTORY} before them and your own last message in that conversation (each cut to {TEXT_CHARS} characters, with sender names, how '
         'long ago each was sent, and whether it mentions you or someone else), your one-line description, and the '
         f"space's own description if the operator gave one, to TypeSafe's Jev model ({gate.jev.model}) through {host}. "
-        'A message of emoji shortcodes or an attachment alone is held without asking Jev, and an edit of a '
+        'A message of emoji shortcodes alone is held without asking Jev, and an edit of a '
         'message it held back is judged again. '
         'Jev is a decision model: it writes no text, and answers typed questions with probabilities (is this addressed '
         'to you, does the chat expect your answer, is there an open problem you could help with, how invited would '
@@ -413,6 +413,24 @@ def permission_prompt(params: Dict) -> str:
             f"Reply `yes {rid}` to allow or `no {rid}` to deny.")
 
 
+def body_with_attachments(msg: Dict) -> str:
+    """The message's text with a line naming what it carries.
+
+    An attachment-only message has no text at all. Read bare it looks like
+    nothing was said, which is how the gate came to hold a voice note without
+    asking Jev about it. The names go in so the gate and the session both see
+    that something arrived, and what kind of thing it is.
+    """
+    body = _body(msg)
+    attachments = msg.get('attachment') or []
+    if not attachments:
+        return body
+    names = [a.get('contentName') for a in attachments if a.get('contentName')]
+    # An attachment Chat gave no name for still counts as something arriving.
+    line = f"[attachments: {', '.join(names)}]" if names else f"[{len(attachments)} attachment(s)]"
+    return f"{body}\n{line}" if body else line
+
+
 def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool = False,
                     space_title: str = '', flags: Optional[Flags] = None, presence: bool = False,
                     content: Optional[str] = None, gate: str = '', gate_reason: str = '') -> Dict:
@@ -443,10 +461,7 @@ def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool =
     if gate_reason:
         meta['gate_reason'] = gate_reason
     if content is None:
-        content = _body(msg)
-        names = [a.get('contentName') for a in msg.get('attachment', []) if a.get('contentName')]
-        if names:
-            content += f"\n[attachments: {', '.join(names)}]"
+        content = body_with_attachments(msg)
     return {'content': content, 'meta': meta}
 
 
@@ -1027,7 +1042,8 @@ class Channel:
             quoted = msg.get('quotedMessageMetadata', {}).get('name', '')
             return GateMessage(
                 sender=self.gate.policy.name if own else get_user_display_name(msg.get('sender', {}), creds),
-                text=_body(msg), ago_seconds=int((now - _parse_time(msg['createTime'])).total_seconds()),
+                text=body_with_attachments(msg),
+                ago_seconds=int((now - _parse_time(msg['createTime'])).total_seconds()),
                 thread=_thread(msg).split('/threads/')[-1], from_agent=own,
                 from_bot=msg.get('sender', {}).get('type') == 'BOT',
                 mentions_agent=flags.mentioned if flags else (not own and mentions_bot(msg.get('text') or '')),

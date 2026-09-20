@@ -72,6 +72,18 @@ class NotificationTest(unittest.TestCase):
         msg['attachment'] = [{'contentName': 'log.txt'}]
         self.assertEqual(to_notification(msg, SPACE, 'x')['content'], 'see file\n[attachments: log.txt]')
 
+    def test_an_attachment_alone_still_says_something_arrived(self):
+        # A voice note has no text. Read bare it looked like an empty message,
+        # and the gate held it without asking Jev (gate.trivial).
+        msg = message('m1', text='')
+        msg['attachment'] = [{'contentName': 'voice-note.ogg'}]
+        self.assertEqual(to_notification(msg, SPACE, 'x')['content'], '[attachments: voice-note.ogg]')
+
+    def test_an_attachment_chat_did_not_name_is_still_counted(self):
+        msg = message('m1', text='')
+        msg['attachment'] = [{'attachmentDataRef': {'resourceName': 'r'}}, {}]
+        self.assertEqual(to_notification(msg, SPACE, 'x')['content'], '[2 attachment(s)]')
+
 
 class BotNameTest(unittest.TestCase):
     def test_name_is_lowercased_and_must_fit_a_chat_message_id(self):

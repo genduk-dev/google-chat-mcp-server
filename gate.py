@@ -175,7 +175,9 @@ def shortcut(new: List[Message]) -> str:
     return ''
 
 
-# An empty message (an attachment alone) or one of custom emoji shortcodes only.
+# A message of custom emoji shortcodes only, or one with nothing in it at all.
+# A message carrying an attachment is NOT this: channel.py puts the attachment's
+# name into the text it builds, so there is something here to judge.
 TRIVIAL_RE = re.compile(r'^\s*(:[\w+-]+:\s*)*$')
 
 
