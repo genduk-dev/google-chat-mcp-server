@@ -217,6 +217,9 @@ different name makes it deliver them back to the session.
   link, and wait; the token lands by itself.
 - **A sender shows as `users/ID`:** ask the person who it is, showing the
   message and its link, and save the answer with `set_user_name`.
+- **The person says who somebody is:** save it as that person's note with
+  `set_user_name`, and every later read shows it after their name, as
+  "Dewi (Software Engineer)".
 - **Starting a channel session:** use the channel config together with
   `--dangerously-load-development-channels`, never one without the other.
 - **Ask the person first** before sending, editing or deleting in someone

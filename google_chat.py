@@ -373,10 +373,12 @@ def prefetch_space_members(space_name: str, creds: Credentials) -> List[Dict]:
     return memberships
 
 
-# Names the user gave for people Google cannot name (deleted or hidden
-# accounts), as {users/ID: name}. Shared by every server process, so it is
-# reread whenever the file changes.
-_user_names: Dict[str, str] = {}
+# What the user told us about people, as {users/ID: entry}. An entry is a bare
+# string (a name for someone Google cannot name) or {"name", "note"}. The name
+# stands in where Google has none; the note is a keeping the user added to
+# whatever name is shown, and is appended to it. Shared by every server
+# process, so it is reread whenever the file changes.
+_user_names: Dict[str, object] = {}
 _user_names_mtime: Optional[int] = None
 
 
@@ -384,7 +386,7 @@ def _user_names_path() -> Path:
     return Path(token_info['token_path']).parent / 'user_names.json'
 
 
-def user_names() -> Dict[str, str]:
+def user_names() -> Dict[str, object]:
     global _user_names, _user_names_mtime
     path = _user_names_path()
     mtime = path.stat().st_mtime_ns if path.exists() else None
@@ -399,22 +401,59 @@ def user_names() -> Dict[str, str]:
     return _user_names
 
 
-def set_user_name(user_id: str, name: str) -> Dict:
-    """Save (or, with an empty name, remove) the name shown for a user Google cannot name."""
+def _entry(saved: object) -> Dict[str, Optional[str]]:
+    """One stored entry as {name, note}, reading the bare string an older file holds."""
+    if isinstance(saved, str):
+        return {'name': saved or None, 'note': None}
+    if isinstance(saved, dict):
+        return {'name': saved.get('name') or None, 'note': saved.get('note') or None}
+    return {'name': None, 'note': None}
+
+
+def _with_note(user_id: str, shown: str) -> str:
+    """The name to show with the user's own note on it, if there is one."""
+    note = _entry(user_names().get(user_id)).get('note')
+    return f'{shown} ({note})' if note else shown
+
+
+def set_user_name(user_id: str, name: Optional[str] = None,
+                  note: Optional[str] = None) -> Dict:
+    """Save the name and the note shown for a user.
+
+    A field left as None is untouched. An empty string clears that field, and an
+    entry with neither left is dropped.
+    """
     if not re.fullmatch(r'users/[0-9]+', user_id):
         raise ValueError(f"Expected 'users/NUMERIC_ID', got {user_id!r}")
     names = dict(user_names())
-    name = name.strip()
-    if name:
-        names[user_id] = name
+    entry = _entry(names.get(user_id))
+    if name is not None:
+        entry['name'] = name.strip() or None
+    if note is not None:
+        entry['note'] = note.strip() or None
+    if entry['note']:
+        names[user_id] = {k: v for k, v in entry.items() if v}
+    elif entry['name']:
+        # No note, so the older bare-string shape says everything there is.
+        names[user_id] = entry['name']
     else:
         names.pop(user_id, None)
     write_private(_user_names_path(), json.dumps(names, indent=2, ensure_ascii=False))
     _user_display_name_cache.pop(user_id, None)
-    return {'user_id': user_id, 'name': name or None, 'saved_names': len(names)}
+    return {'user_id': user_id, 'name': entry['name'], 'note': entry['note'],
+            'saved_names': len(names)}
 
 
 def get_user_display_name(sender: Dict, creds: Credentials) -> str:
+    """The name to show for a sender, with the user's own note on it.
+
+    The cache below holds the name Google gives, so a note changed in another
+    session shows up without the cache being rebuilt.
+    """
+    return _with_note(sender.get('name', ''), _google_display_name(sender, creds))
+
+
+def _google_display_name(sender: Dict, creds: Credentials) -> str:
     """Get user display name with caching.
 
     Checks cache first (populated by prefetch_space_members), then tries
@@ -441,9 +480,10 @@ def get_user_display_name(sender: Dict, creds: Credentials) -> str:
         return sender['displayName']
 
     # A name the user gave for someone Google cannot name.
-    if user_id in saved:
-        _user_display_name_cache[user_id] = saved[user_id]
-        return saved[user_id]
+    saved_name = _entry(saved.get(user_id))['name']
+    if saved_name:
+        _user_display_name_cache[user_id] = saved_name
+        return saved_name
 
     # For BOT type, extract short ID
     if sender_type == 'BOT':
@@ -607,8 +647,9 @@ def _member_fields(membership: Dict) -> Dict:
     saved = user_names()  # rereads a mapping another session changed, dropping stale cache entries
     return {
         'user_id': user_id,
-        'display_name': (_user_display_name_cache.get(user_id) or member.get('displayName')
-                         or saved.get(user_id) or user_id),
+        'display_name': _with_note(user_id, _user_display_name_cache.get(user_id)
+                                   or member.get('displayName')
+                                   or _entry(saved.get(user_id))['name'] or user_id),
         'mention': f'<{user_id}>',
         'type': member.get('type', 'HUMAN'),
         'role': membership.get('role', 'ROLE_MEMBER'),

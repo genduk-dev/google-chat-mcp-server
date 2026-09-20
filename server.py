@@ -361,23 +361,32 @@ async def find_direct_message(user_id: str) -> str:
     return _json(await _find_direct_message(user_id))
 
 @mcp.tool(output_schema=None)
-async def set_user_name(user_id: str, name: str) -> str:
-    """Save the name to show for a person Google cannot name.
+async def set_user_name(user_id: str, name: str | None = None,
+                        note: str | None = None) -> str:
+    """Save the name, and the note, to show for a person.
 
-    Messages from deleted or hidden accounts show the sender as "users/ID". When the
-    user tells you who that is (ask them when such a message matters, showing its text,
-    space and link), save it here. Every read then shows this name for that ID, in this
-    and other sessions. A name Google does provide always wins over a saved one.
+    The name is for people Google cannot name. Messages from deleted or hidden accounts
+    show the sender as "users/ID". When the user tells you who that is (ask them when
+    such a message matters, showing its text, space and link), save it here. A name
+    Google does provide always wins over a saved one.
+
+    The note is what the user keeps about a person Google can already name: their role,
+    their team, how they are known. It is appended to whatever name is shown, as
+    "Dewi (Software Engineer)". Save one when the user says who
+    somebody is.
+
+    Either field left out stays as it is. An empty string clears that field.
 
     Args:
         user_id: The sender as shown, 'users/NUMERIC_ID'
-        name: The name to show; an empty string removes the saved name
+        name: The name to show where Google gives none
+        note: The keeping to show after the name
 
     Returns:
-        {"user_id", "name", "saved_names": how many names are saved}
+        {"user_id", "name", "note", "saved_names": how many people are saved}
     """
     from google_chat import set_user_name as _set
-    return _json(_set(user_id, name))
+    return _json(_set(user_id, name, note))
 
 @mcp.tool(output_schema=None)
 async def create_space(space_type: str, members: List[str] = None, name: str = None,

@@ -151,7 +151,7 @@ class UserNamesTest(unittest.TestCase):
     def test_saved_name_replaces_the_id_and_google_name_wins(self):
         self.assertEqual(self.name({'name': 'users/9'}), 'users/9')   # deleted account, no name yet
         result = google_chat.set_user_name('users/9', 'Budi (ex-ops)')
-        self.assertEqual(result, {'user_id': 'users/9', 'name': 'Budi (ex-ops)', 'saved_names': 1})
+        self.assertEqual(result, {'user_id': 'users/9', 'name': 'Budi (ex-ops)', 'note': None, 'saved_names': 1})
         self.assertEqual(self.name({'name': 'users/9'}), 'Budi (ex-ops)')
         self.assertEqual(self.name({'name': 'users/8', 'displayName': 'Dewi'}), 'Dewi')
         path = Path(self.dir.name) / 'user_names.json'
@@ -180,6 +180,33 @@ class UserNamesTest(unittest.TestCase):
         os.utime(path, ns=(10**18, 10**18))
         fields = google_chat._member_fields({'member': {'name': 'users/9', 'type': 'HUMAN'}})
         self.assertEqual(fields['display_name'], 'Budi')
+
+    def test_a_note_is_shown_after_whatever_name_google_gives(self):
+        result = google_chat.set_user_name('users/8', note='Software Engineer')
+        self.assertEqual(result, {'user_id': 'users/8', 'name': None,
+                                  'note': 'Software Engineer', 'saved_names': 1})
+        self.assertEqual(self.name({'name': 'users/8', 'displayName': 'Dewi'}),
+                         'Dewi (Software Engineer)')
+        fields = google_chat._member_fields(
+            {'member': {'name': 'users/8', 'type': 'HUMAN', 'displayName': 'Dewi'}})
+        self.assertEqual(fields['display_name'], 'Dewi (Software Engineer)')
+
+    def test_a_note_and_a_saved_name_are_kept_apart(self):
+        google_chat.set_user_name('users/9', 'Budi')
+        google_chat.set_user_name('users/9', note='ex-ops')
+        self.assertEqual(self.name({'name': 'users/9'}), 'Budi (ex-ops)')
+        google_chat.set_user_name('users/9', note='')
+        self.assertEqual(self.name({'name': 'users/9'}), 'Budi')
+        path = Path(self.dir.name) / 'user_names.json'
+        self.assertEqual(json.loads(path.read_text()), {'users/9': 'Budi'})
+
+    def test_a_note_another_session_saved_is_picked_up(self):
+        self.assertEqual(self.name({'name': 'users/8', 'displayName': 'Dewi'}), 'Dewi')
+        path = Path(self.dir.name) / 'user_names.json'
+        path.write_text(json.dumps({'users/8': {'note': 'Software Engineer'}}))
+        os.utime(path, ns=(10**18, 10**18))
+        self.assertEqual(self.name({'name': 'users/8', 'displayName': 'Dewi'}),
+                         'Dewi (Software Engineer)')
 
     def test_empty_name_removes_and_bad_ids_are_rejected(self):
         google_chat.set_user_name('users/9', 'Budi')
