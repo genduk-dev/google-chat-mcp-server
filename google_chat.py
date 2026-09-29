@@ -2,6 +2,7 @@ import os
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import http.server
 import threading
 import time
@@ -99,6 +100,24 @@ class _ChatRetry(Retry):
         seconds = super().get_retry_after(response)
         return None if seconds is None else min(seconds, 30.0)
 
+def _reuse_collections(resource):
+    """Make each collection accessor (service.spaces(), .messages()) build its Resource once.
+
+    googleapiclient builds a new Resource on every such call, and each renders its
+    methods' docstrings from the discovery schema: 24 MiB for spaces().messages().
+    A Resource holds its own bound methods, a cycle only a full GC frees, and a
+    channel polling every 5 seconds held about a gigabyte of them between full GCs.
+    Nothing reads those docstrings, so they are dropped as well.
+    """
+    for name in list(resource._dynamic_attrs):
+        attr = resource.__dict__[name]
+        if getattr(attr, '__is_resource__', False):
+            resource.__dict__[name] = functools.cache(lambda build_child=attr: _reuse_collections(build_child()))
+        elif hasattr(attr, '__func__'):
+            attr.__func__.__doc__ = None
+    resource._schema.pretty.clear()
+    return resource
+
 def _get_service(api: str, version: str, creds: Credentials) -> object:
     """Get or create a cached Google API service object."""
     cache_key = f"{api}:{version}:{creds.token}"
@@ -108,7 +127,8 @@ def _get_service(api: str, version: str, creds: Credentials) -> object:
         stale = [k for k in _service_cache if k.startswith(prefix) and k != cache_key]
         for k in stale:
             del _service_cache[k]
-        _service_cache[cache_key] = build(api, version, credentials=creds, requestBuilder=_RetryingHttpRequest)
+        _service_cache[cache_key] = _reuse_collections(
+            build(api, version, credentials=creds, requestBuilder=_RetryingHttpRequest))
     return _service_cache[cache_key]
 
 def _build_send_kwargs(space_name: str, body: Dict, thread_key: Optional[str] = None, thread_name: Optional[str] = None) -> Dict:
