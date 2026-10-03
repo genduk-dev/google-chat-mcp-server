@@ -894,8 +894,16 @@ class PollerLockTest(unittest.TestCase):
         b.try_acquire()
         self.assertEqual(b.cursors[SPACE], '2026-01-01T00:00:00Z')
 
+    def test_cursors_of_a_poller_gone_for_a_day_and_a_half_are_resumed(self):
+        # What was sent while no session listened still reaches the next one.
+        old = channel.datetime.datetime.now(channel.datetime.timezone.utc) - channel.datetime.timedelta(hours=44)
+        self.write_saved({SPACE: '2026-01-01T00:00:00Z'}, old)
+        b = self.channel()
+        b.try_acquire()
+        self.assertEqual(b.cursors[SPACE], '2026-01-01T00:00:00Z')
+
     def test_cursors_of_a_poller_gone_too_long_are_not_resumed(self):
-        old = channel.datetime.datetime.now(channel.datetime.timezone.utc) - channel.datetime.timedelta(hours=1)
+        old = channel.datetime.datetime.now(channel.datetime.timezone.utc) - channel.datetime.timedelta(hours=49)
         self.write_saved({SPACE: '2026-01-01T00:00:00Z'}, old)
         b = self.channel()
         b.try_acquire()

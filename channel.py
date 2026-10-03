@@ -152,9 +152,11 @@ def gate_instructions(gate: Gate) -> str:
     )
 
 # A takeover resumes from saved cursors only if the previous poller saved them
-# this recently. Older ones mean no channel session was running, and replaying
-# that backlog would flood the new session with messages nobody asked it to handle.
-RESUME_WINDOW = datetime.timedelta(minutes=10)
+# this recently. Older ones mean no channel session ran for days, and that
+# backlog would flood the new session with messages nobody waits on any more.
+# It was ten minutes until 2026-10-03: the channel was deaf for two days that
+# week, and every message sent to it then was skipped when it came back.
+RESUME_WINDOW = datetime.timedelta(hours=48)
 # The poller re-saves unchanged cursors this often, so a quiet space still
 # looks alive to a takeover.
 CURSOR_HEARTBEAT = datetime.timedelta(minutes=1)
