@@ -126,7 +126,9 @@ With `CHANNEL_GATE=jev`, no space needs a mention and `mention_only` has no
 effect. A mention or a quote reply to the bot still arrives at once. Every
 other batch, once the chat pauses, goes to TypeSafe's Jev decision model
 (`typesafe/jev-1.13` through OpenRouter by default), which decides whether the
-session answers, reacts with an emoji, joins in unasked, or stays out.
+session is woken: to answer, for a message to it that may need no answer
+(`gate="addressed"`, where the session itself answers, reacts or stays
+silent), to join in unasked, or not at all. The gate makes no reaction itself.
 
 | Variable | Meaning |
 | --- | --- |
@@ -135,7 +137,7 @@ session answers, reacts with an emoji, joins in unasked, or stays out.
 | `CHANNEL_GATE_KEY_FILE` or `OPENROUTER_API_KEY` | The API key. A file keeps it out of the environment the session's own shell inherits. Optional with `CHANNEL_GATE_URL`, for a proxy that adds the key itself |
 | `CHANNEL_GATE_ALIASES` | Comma-separated nicknames people call the bot by |
 | `CHANNEL_GATE_MODEL`, `CHANNEL_GATE_URL` | Another model, or another endpoint: TypeSafe's own, or a proxy such as an exe.dev integration (`https://<name>.int.exe.xyz/api/alpha/decisions`) |
-| `CHANNEL_GATE_REPLY`, `_INTERJECT`, `_JOIN`, `_REACT`, `_PERSONAL`, `_INTERJECT_QUIET` | Thresholds, see `gate.py` |
+| `CHANNEL_GATE_REPLY`, `_INTERJECT`, `_JOIN`, `_PERSONAL`, `_INTERJECT_QUIET` | Thresholds, see `gate.py` |
 | `CHANNEL_GATE_LOG_DAYS` | How long `gate_log.jsonl` keeps an entry (default 14) |
 | `CHANNEL_TIMEZONE` | The zone delivery times are written in, for example `Asia/Jakarta` (any mode) |
 
@@ -146,7 +148,9 @@ Each space in the channel state file may also set, by hand:
   threshold.
 - `max_share`: the bot joins in unasked only while it wrote at most this
   share of the last ten messages (default 0.3).
-- `reactions`: `false` makes the channel add no reaction in that space.
+- `reactions`: `false` makes the rules mode add no 👀 in that space, and
+  every delivery from it carries `reactions="off"`, so the session makes none
+  either. The gate adds none anywhere.
 
 Know what it sends: the new messages, up to twelve before them (read from
 Chat when the poller has not seen them, as after a restart) and the bot's
@@ -155,9 +159,9 @@ sender names, plus the bot's description and the space's norms. Every decision g
 that text, for `CHANNEL_GATE_LOG_DAYS`. An edit of a message the gate held
 back is judged again, so a question edited to name the bot can still reach it.
 With the gate there is no 👀 acknowledgement, since the answer comes within
-seconds. The gate's reactions are made with the signed-in
-user's own account, since Chat takes them from a user only, so in a space
-they show as that person. Turn them off where that would mislead.
+seconds. A reaction the session makes is made with the signed-in user's own
+account, since Chat takes them from a user only, so in a space it shows as
+that person.
 
 **Always start that config with the flag, and on one machine only.**
 

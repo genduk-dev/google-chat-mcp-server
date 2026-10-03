@@ -5,8 +5,9 @@ acts on the Decision. That boundary is what lets the same rules run behind
 another chat network later.
 
 The agent is a member of the chat, not a help desk: it answers what is for it,
-reacts with an emoji where a person would, and joins in, to help or just to
-talk, where that would feel natural.
+and joins in, to help or just to talk, where that would feel natural. The gate
+only decides whether the agent is woken. What the agent then does, an answer,
+an emoji or nothing, is the agent's call, made with the whole conversation.
 
 Two shortcuts never ask Jev: a message that mentions the agent or replies to
 one of its messages. Everyone in the chat can count on those reaching it,
@@ -27,14 +28,13 @@ import requests
 logger = logging.getLogger(__name__)
 
 REPLY = 'reply'
-REACT = 'react'
+# For the agent, but the chat may not expect an answer: an ok, a thanks, or a
+# yes to something the agent offered to do.
+ADDRESSED = 'addressed'
 INTERJECT = 'interject'
 HOLD = 'hold'
 
 TEXT_CHARS = 400
-
-# Emoji a reaction may use, by the name Jev chooses.
-EMOJI = {'thumbs_up': '👍', 'laugh': '😂', 'heart': '❤️', 'pray': '🙏'}
 
 
 def questions(name: str) -> Dict:
@@ -77,14 +77,6 @@ def questions(name: str) -> Dict:
             'type': 'noul',
             'instructions': f'Is this a personal or sensitive conversation where {name} chiming in would be unwelcome?',
         },
-        'reaction': {
-            'type': 'choice',
-            'instructions': 'Which emoji reaction would a friendly coworker put on the newest message, if any?',
-            'criteria': {'none': 'No reaction fits.', 'thumbs_up': 'An acknowledgement, an ok, or agreement.',
-                         'laugh': 'Something funny: a joke, banter, or laughter.',
-                         'heart': 'Something warm: good news, appreciation, or a kind word.',
-                         'pray': 'Thanks, or a wish for luck.'},
-        },
     }
 
 
@@ -104,7 +96,7 @@ class Message:
     # Its sender edited it after sending.
     edited: bool = False
     new: bool = False
-    # What the agent did about this message: 'stayed_silent' or 'reacted'.
+    # What the agent did about this message: 'stayed_silent' when the gate held it.
     agent_action: str = ''
 
     def state(self) -> Dict:
@@ -128,7 +120,6 @@ class Policy:
     reply: float = 0.6
     interject: float = 0.8
     join: float = 0.85
-    react: float = 0.8
     personal: float = 0.5
     interject_quiet: float = 30.0
 
@@ -146,7 +137,6 @@ class Policy:
                    reply=number('CHANNEL_GATE_REPLY', cls.reply),
                    interject=number('CHANNEL_GATE_INTERJECT', cls.interject),
                    join=number('CHANNEL_GATE_JOIN', cls.join),
-                   react=number('CHANNEL_GATE_REACT', cls.react),
                    personal=number('CHANNEL_GATE_PERSONAL', cls.personal),
                    interject_quiet=number('CHANNEL_GATE_INTERJECT_QUIET', cls.interject_quiet))
 
@@ -159,8 +149,6 @@ class Decision:
     scores: Dict = dataclasses.field(default_factory=dict)
     # For INTERJECT, why: 'help' (an open problem) or 'join' (the talk itself).
     reason: str = ''
-    # For REACT, the emoji.
-    emoji: str = ''
 
 
 def shortcut(new: List[Message]) -> str:
@@ -215,26 +203,24 @@ def scores(answers: Dict) -> Dict:
 def decide(policy: Policy, s: Dict) -> Decision:
     """The action for a batch Jev scored.
 
-    A reply needs the chat to expect one. Addressed but not expecting a reply is
-    thanks or an ok: a reaction, so nobody waits and the agent is not woken for
-    it. Nothing personal is joined. Otherwise the agent joins in where there is
-    an open problem it can help with, or where joining the talk would feel
-    natural, and a message it stays out of can still get a reaction a person
-    would give, such as a laugh at a joke.
+    A reply needs the chat to expect one. A message for the agent that expects
+    none still wakes it, as ADDRESSED: it was an ok or a thanks, or a yes to
+    something the agent offered to do, and only the agent can tell those apart.
+    Answering that with an emoji used to be the gate's, and it put a 👍 on a
+    "ya" that asked for work and left the agent asleep. Nothing personal is
+    joined. Otherwise the agent joins in where there is an open problem it can
+    help with, or where joining the talk would feel natural.
     """
-    confident = s.get('reaction_p', {}).get(s['reaction'], 0) >= policy.react
     if s['wants_reply'] >= policy.reply:
         return Decision(REPLY, scores=s)
     if s['addressed'] >= policy.reply:
-        return Decision(REACT, scores=s, emoji=EMOJI.get(s['reaction'], EMOJI['thumbs_up']))
+        return Decision(ADDRESSED, scores=s)
     if s['personal'] >= policy.personal:
         return Decision(HOLD, scores=s)
     if s['could_help'] >= policy.interject:
         return Decision(INTERJECT, scores=s, reason='help')
     if s['natural_to_join'] >= policy.join:
         return Decision(INTERJECT, scores=s, reason='join')
-    if confident and s['reaction'] in EMOJI:
-        return Decision(REACT, scores=s, emoji=EMOJI[s['reaction']])
     return Decision(HOLD, scores=s)
 
 

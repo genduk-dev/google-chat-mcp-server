@@ -983,13 +983,14 @@ class GatedSpaceTest(SpaceCase):
         self.assertEqual((entry['event'], entry['action'], entry['names']),
                          ('decision', 'reply', [f'{SPACE}/messages/m1', f'{SPACE}/messages/m2']))
 
-    def test_thanks_gets_a_reaction_and_no_turn(self):
-        self.scored(addressed=0.96, wants_reply=0.2, reaction='pray')
-        self.poll([self.m('m1', OTHER, 'mantap makasih', 0)], 1)
-        self.assertEqual(self.poll([], 5), [])
-        call = self.chat.spaces().messages().reactions().create.call_args
-        self.assertEqual((call.kwargs['parent'], call.kwargs['body']),
-                         (f'{SPACE}/messages/m1', {'emoji': {'unicode': '🙏'}}))
+    def test_a_message_to_the_bot_that_needs_no_answer_still_wakes_it(self):
+        # The bot tells an ok from a yes to what it offered; the gate cannot.
+        self.scored(addressed=0.95, wants_reply=0.5)
+        self.poll([self.m('m1', OTHER, 'ya', 0)], 1)
+        out = self.poll([], 5)
+        self.assertEqual(out[0]['meta']['gate'], 'addressed')
+        self.assertEqual(self.reactions(), [])
+        self.assertEqual(self.log()[-1]['action'], 'addressed')
 
     def test_chiming_in_waits_for_a_longer_pause_and_starts_over_when_someone_speaks(self):
         self.scored(could_help=0.95, wants_reply=0.5)
@@ -1005,34 +1006,30 @@ class GatedSpaceTest(SpaceCase):
         self.assertEqual(self.reactions(), [])            # nobody asked, so nothing to acknowledge
 
     def test_banter_is_joined_with_its_reason(self):
-        self.scored(natural_to_join=0.9, reaction='laugh')
+        self.scored(natural_to_join=0.9)
         self.poll([self.m('m1', OTHER, 'wkwk deploy jumat sore', 0)], 1)
         out = self.poll([], 31)
         self.assertEqual((out[0]['meta']['gate'], out[0]['meta']['gate_reason']), ('interject', 'join'))
 
-    def test_a_joke_gets_a_laugh_unless_the_bot_just_reacted_or_the_space_turned_reactions_off(self):
-        self.scored(natural_to_join=0.5, reaction='laugh', reaction_p=0.9)
-        self.poll([self.m('m1', OTHER, 'wkwk', 0)], 1)
-        self.poll([], 5)
-        self.poll([self.m('m2', OTHER, 'wkwkwk', 10)], 10)
-        self.poll([], 15)
-        self.assertEqual(self.reactions(), ['m1'])       # one reaction in the last three is enough
-        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True, 'reactions': False}})
-        for i, sec in enumerate(range(20, 60, 10)):
+    def test_the_gate_itself_never_reacts(self):
+        self.scored(natural_to_join=0.5)
+        for i, sec in enumerate(range(0, 40, 10)):
             self.poll([self.m(f'n{i}', OTHER, 'wkwk', sec)], sec)
-            self.poll([], sec + 5)
-        self.assertEqual(self.reactions(), ['m1'])
+            self.assertEqual(self.poll([], sec + 5), [])
+        self.scored(addressed=0.96, wants_reply=0.2)
+        self.poll([self.m('m1', OTHER, 'makasih Nduk', 50)], 51)
+        self.assertEqual(self.poll([], 55)[0]['meta']['gate'], 'addressed')
+        self.assertEqual(len(self.poll([self.m('m2', OTHER, '@genduk cek dong', 60)], 61)), 1)
+        self.assertEqual(self.reactions(), [])            # no 👀 for a mention either
 
-    def test_reactions_off_means_none_at_all_in_that_space(self):
-        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True, 'reactions': False}})
-        self.scored(addressed=0.96, wants_reply=0.2, reaction='pray')
+    def test_a_space_with_reactions_off_tells_the_session_so(self):
+        # The session may react to what it is woken for; here it must not.
+        self.scored(addressed=0.96, wants_reply=0.2)
         self.poll([self.m('m1', OTHER, 'makasih Nduk', 0)], 1)
-        self.assertEqual(self.poll([], 5), [])            # thanks to the bot: no emoji either
-        self.assertEqual(len(self.poll([self.m('m2', OTHER, '@genduk cek dong', 10)], 11)), 1)
-        self.scored(addressed=0.9, wants_reply=0.9)
-        self.poll([self.m('m3', OTHER, 'Nduk, satu lagi', 20)], 21)
-        self.assertEqual(self.poll([], 25)[0]['meta']['gate'], 'reply')
-        self.assertEqual(self.reactions(), [])            # no 👀 for a mention or a reply
+        self.assertNotIn('reactions', self.poll([], 5)[0]['meta'])
+        self.store.save({SPACE: {'allowed_senders': None, 'mention_only': True, 'reactions': False}})
+        self.poll([self.m('m2', OTHER, 'oke Nduk', 10)], 11)
+        self.assertEqual(self.poll([], 15)[0]['meta']['reactions'], 'off')
 
     def test_chiming_in_stops_once_the_bot_has_its_share_of_the_talk(self):
         self.scored(natural_to_join=0.95)
@@ -1141,7 +1138,8 @@ class GatedSpaceTest(SpaceCase):
         from gate import Jev
         self.ch.gate.jev = Jev({'OPENROUTER_API_KEY': 'k', 'CHANNEL_GATE_MODEL': 'typesafe/jev-9'})
         text = channel.gate_instructions(self.ch.gate)
-        for fact in ('typesafe/jev-9', 'through openrouter.ai', 'judged again', 'turn reactions off', 'up to 12 before them', 'cut to 400 characters',
+        for fact in ('typesafe/jev-9', 'through openrouter.ai', 'judged again', 'never reacts itself', 'gate="addressed"',
+                     'up to 12 before them', 'cut to 400 characters',
                      'more than 30% of the last 10 messages', 'pauses for 4 seconds', 'for 10 minutes'):
             self.assertIn(fact, text)
         self.assertNotIn('k', text.split('through')[1][:20])   # never the key

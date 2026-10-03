@@ -19,8 +19,8 @@ space for that lives in the poller's memory only, so a restart starts idle.
 With CHANNEL_GATE=jev no space has presence, and mention_only means nothing.
 In every watched space a mention or a quote reply still arrives at once, and
 every other batch goes to the gate
-(gate.py), which asks Jev whether to deliver it, react to it with an emoji,
-join in (to help, or just to talk), or hold it back. What it held back reaches the session later as context.
+(gate.py), which asks Jev whether to deliver it, join in (to help, or just
+to talk), or hold it back. What it held back reaches the session later as context.
 """
 import contextlib
 import copy
@@ -42,7 +42,7 @@ import mcp.types as types
 from mcp.server.runner import serve_loop
 from mcp.shared.message import SessionMessage
 
-from gate import HOLD, INTERJECT, REACT, REPLY, TEXT_CHARS, Decision, Gate, JevError, Message as GateMessage
+from gate import ADDRESSED, HOLD, INTERJECT, REPLY, TEXT_CHARS, Decision, Gate, JevError, Message as GateMessage
 from google_chat import (APP_MESSAGE_PREFIX, BOT_NAME, AttachmentTooLarge, get_credentials,
                          get_user_display_name, message_text, save_attachment, space_display_name,
                          self_user_id, send_space_message, update_message, write_private, _get_service,
@@ -109,7 +109,9 @@ INSTRUCTIONS = (
     'only the operator can answer them. A message that was edited arrives again with edited="true" '
     'and the same message_name, with the version you saw under "Before the edit" when you saw one. '
     'Treat it as a correction of that version, and reply only when the edit changes what was asked '
-    'or what it means, or adds a request; a fixed typo needs nothing.'
+    'or what it means, or adds a request; a fixed typo needs nothing. A reaction you make shows as '
+    'the signed-in user, and reactions="off" marks a space where the operator turned them off: '
+    'make none there.'
 )
 
 def gate_instructions(gate: Gate) -> str:
@@ -123,11 +125,12 @@ def gate_instructions(gate: Gate) -> str:
         ' This channel runs a classifier gate in every watched space, in place of mention_only and presence: a '
         'mention or a quote reply to you still arrives at once, and any other message arrives only when the gate '
         'lets it through. Such a delivery carries gate="reply" when the gate judged that the chat expects your '
-        'answer, or gate="interject" when nobody asked you but joining in would be natural: gate_reason="help" when '
-        'there is an open question you may be able to help with, gate_reason="join" when the talk itself invites a '
-        'remark or a joke. Either way say one short thing that fits, and stay silent when nothing does. The gate '
-        'also reacts with an emoji for you where that is all a person would do. What the gate held back reaches you '
-        'later under "Earlier". leave_conversation holds back everything but mentions and quote replies there for '
+        'answer, gate="addressed" when it is for you but may not need an answer (an ok or a thanks, or a yes to '
+        'something you offered to do, which then needs you to do it), or gate="interject" when nobody asked you but '
+        'joining in would be natural: gate_reason="help" when there is an open question you may be able to help '
+        'with, gate_reason="join" when the talk itself invites a remark or a joke. For "addressed" and "interject", '
+        'answer, react with an emoji, or stay silent, whichever a person would; for "interject" say at most one '
+        'short thing. What the gate held back reaches you later under "Earlier". leave_conversation holds back everything but mentions and quote replies there for '
         f'{int(PRESENCE_IDLE.total_seconds() // 60)} minutes.'
         ' What follows is how the gate works. You may explain it when someone asks, and should not embellish it. '
         f'The gate is the channel server, not you. When a chat pauses for {int(BATCH_QUIET.total_seconds())} seconds, it sends the new '
@@ -138,11 +141,10 @@ def gate_instructions(gate: Gate) -> str:
         'message it held back is judged again. '
         'Jev is a decision model: it writes no text, and answers typed questions with probabilities (is this addressed '
         'to you, does the chat expect your answer, is there an open problem you could help with, how invited would '
-        'you feel to join, is it personal, which emoji fits). The server turns those into reply, react, join or '
-        f'hold with fixed thresholds. It stops you joining in unasked while you wrote more than '
+        'you feel to join, is it personal). The server turns those into reply, addressed, join or hold with fixed '
+        f'thresholds. It stops you joining in unasked while you wrote more than '
         f'{int(GATE_MAX_SHARE * 100)}% of the last {GATE_SHARE_WINDOW} messages, unless the space sets its own share. '
-        'The operator may also turn reactions off in a space, since they show as the account the channel signs in '
-        'with, and then it adds none. The gate puts no emoji on a message it passes to you, so nobody sees that '
+        'The gate never reacts itself. It puts no emoji on a message, the one it passes to you included, so nobody sees that '
         'you started: when answering takes more than a quick look, say in a short message what you are doing first. '
         'A message that mentions or quotes you reaches you without Jev judging it, though it can be part of what Jev reads later. You yourself are a Claude model in a Claude Code session, '
         'and your replies are written by you, not by Jev. If you are asked about something this does not cover, such '
@@ -198,15 +200,13 @@ GATE_RETRY = datetime.timedelta(seconds=30)
 # Joining in unasked is held back by the bot's share of the conversation, like a
 # person who keeps from dominating a group, instead of by a clock: a fixed
 # cooldown left it silent through a lively chat it had joined once. A space's
-# config may set 'max_share' of the last GATE_SHARE_WINDOW messages. It may also
-# set 'reactions' to false, and 'norms', the operator's description of how the
-# space works, which Jev reads. Reactions can only be made as the signed-in
-# user, so in a space with other people every emoji shows as that person.
-# 'reactions': false makes none there.
+# config may set 'max_share' of the last GATE_SHARE_WINDOW messages, and
+# 'norms', the operator's description of how the space works, which Jev reads.
+# 'reactions': false is the rules mode's: no ACK_EMOJI there. Reactions can only
+# be made as the signed-in user, so in a space with other people every emoji
+# shows as that person.
 GATE_SHARE_WINDOW = 10
 GATE_MAX_SHARE = 0.3
-# An unasked reaction skips a message when one of this many before it got one.
-GATE_REACTION_SPACING = 3
 GATE_CONFIG_KEYS = ('norms', 'max_share', 'reactions')
 
 
@@ -342,8 +342,8 @@ class SpaceState:
     deliveries: List[datetime.datetime] = dataclasses.field(default_factory=list)
     # With the gate: the decision on the pending batch and the newest message it
     # covered, so a batch is judged once until it grows; when to ask again after
-    # Jev failed; and what it did about messages it did not deliver (message
-    # name -> 'stayed_silent' or 'reacted').
+    # Jev failed; and which messages it did not deliver (message name ->
+    # 'stayed_silent').
     judged: Optional[Tuple[str, Decision]] = None
     gate_retry_at: Optional[datetime.datetime] = None
     silent: Dict[str, str] = dataclasses.field(default_factory=dict)
@@ -454,7 +454,8 @@ def body_with_attachments(msg: Dict) -> str:
 
 def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool = False,
                     space_title: str = '', flags: Optional[Flags] = None, presence: bool = False,
-                    content: Optional[str] = None, gate: str = '', gate_reason: str = '') -> Dict:
+                    content: Optional[str] = None, gate: str = '', gate_reason: str = '',
+                    reactions_off: bool = False) -> Dict:
     """Build notification params. Meta keys must be identifiers or Claude Code drops them.
 
     content defaults to the message's own text with its attachments' names.
@@ -481,6 +482,8 @@ def to_notification(msg: Dict, space_name: str, sender_name: str, edited: bool =
         meta['gate'] = gate
     if gate_reason:
         meta['gate_reason'] = gate_reason
+    if reactions_off:
+        meta['reactions'] = 'off'
     if content is None:
         content = body_with_attachments(msg)
     return {'content': content, 'meta': meta}
@@ -936,7 +939,8 @@ class Channel:
         notification = to_notification(
             last, space_name, get_user_display_name(last.get('sender', {}), creds),
             space_title=self._space_title(space_name, creds), flags=last_flags, presence=presence,
-            content=self._content(creds, operator, batch, earlier, left_out), gate=gate, gate_reason=gate_reason)
+            content=self._content(creds, operator, batch, earlier, left_out), gate=gate, gate_reason=gate_reason,
+            reactions_off=config.get('reactions') is False)
         for msg in [m for m, _ in batch] + earlier:
             state.seen[msg['name']] = now
             state.saw(msg)
@@ -967,13 +971,12 @@ class Channel:
     def _gated(self, chat, creds, space_name: str, config: Dict, state: SpaceState, operator: str,
                now: datetime.datetime) -> List[Dict]:
         """The pending batch of a gated space, once the chat paused: judged once until it
-        grows, then delivered, reacted to, chimed in on, or held back.
+        grows, then delivered, chimed in on, or held back.
 
         Chiming in waits longer than a reply, so a person can answer first: a new
         message grows the batch and it is judged again. Joining in unasked is held
         back where the bot already has its share of the conversation (see
-        GATE_MAX_SHARE), and so is an emoji where the space turned reactions off or
-        the bot just reacted. A failed call leaves the batch waiting and is retried
+        GATE_MAX_SHARE). A failed call leaves the batch waiting and is retried
         after GATE_RETRY.
         """
         if not state.pending:
@@ -999,22 +1002,14 @@ class Channel:
                 action = HOLD
             elif quiet.total_seconds() < policy.interject_quiet:
                 return []
-        elif action == REACT:
-            recent = [m['name'] for m in state.buffer if m['name'] not in {p[0]['name'] for p in state.pending}]
-            unasked = decision.scores['addressed'] < policy.reply
-            if config.get('reactions') is False or (unasked and any(
-                    state.silent.get(name) == 'reacted' for name in recent[-GATE_REACTION_SPACING:])):
-                action = HOLD
         batch = [(m, f) for m, f, _ in state.pending]
         state.pending, state.judged = [], None
-        if action in (REPLY, INTERJECT):
+        if action in (REPLY, ADDRESSED, INTERJECT):
             return [self._delivery(chat, creds, space_name, config, state, operator, now, batch,
                                    acknowledged=[], gate=action,
                                    gate_reason=decision.reason if action == INTERJECT else '')]
-        if action == REACT:
-            self._acknowledge(chat, batch[-1][0], decision.emoji)
         for msg, _ in batch:
-            state.silent[msg['name']] = 'reacted' if action == REACT else 'stayed_silent'
+            state.silent[msg['name']] = 'stayed_silent'
         return []
 
     @staticmethod
@@ -1036,7 +1031,7 @@ class Channel:
             self._gate_log({'event': 'error', 'space': space_name, 'error': str(e)})
             return None
         self._gate_log({'event': 'decision', 'space': space_name, 'action': decision.action,
-                        'reason': decision.reason, 'emoji': decision.emoji,
+                        'reason': decision.reason,
                         'scores': decision.scores, 'ms': int((self._clock() - started).total_seconds() * 1000),
                         'messages': [m.state() for m in messages],
                         'names': [m['name'] for m, _, _ in state.pending]})
