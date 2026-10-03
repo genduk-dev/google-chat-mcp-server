@@ -45,6 +45,18 @@ The poller blocks the event loop, like every tool call. Anything that can
 block for long (retries, big listings) has to stay under the lease's 60
 seconds, or a standby takes over.
 
+### The channel serves the legacy handshake only
+
+Claude Code skips a channel on a connection that negotiated a modern protocol
+revision (2026-07-28 on): "no unsolicited notification path". From 2.1.286 it
+opens with a `server/discover` probe, and the SDK's `Server.run` lets that
+first request make the connection modern, so from 2026-10-01 every channel
+session came up deaf and the poller never started. `run_channel` serves through
+`channel.serve_legacy` (`serve_loop`), which answers the probe with Method not
+found, and Claude Code falls back to `initialize`. The plain server keeps both
+eras. Do not move the channel back to `Server.run` until Claude Code delivers
+channels on a modern connection.
+
 ### A write that failed with a 5xx may have happened
 
 Retry a 429 for any method: Google did not process it. Retry a 5xx only for a

@@ -1235,5 +1235,35 @@ class GatedSpaceTest(SpaceCase):
         self.assertNotIn('presence', self.ch.list_watched()['spaces'][0])
 
 
+class HandshakeTest(unittest.IsolatedAsyncioTestCase):
+    # Claude Code skips a channel on a modern connection, and from 2.1.286 it
+    # probes server/discover before initialize, which Server.run let make the
+    # connection modern, so every channel session came up deaf.
+    async def test_a_client_that_probes_first_lands_on_the_legacy_handshake_with_the_channel(self):
+        import anyio
+        import mcp.types as types
+        from mcp.client.session import ClientSession
+        from mcp.server.lowlevel import Server
+        from mcp.shared.exceptions import MCPError
+        from mcp.shared.memory import create_client_server_memory_streams
+        from mcp_types.version import MODERN_PROTOCOL_VERSIONS
+
+        server = Server('channel')
+        options = server.create_initialization_options(experimental_capabilities=channel.CAPABILITIES)
+        async with create_client_server_memory_streams() as (client_streams, server_streams):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(channel.serve_legacy, server, *server_streams, options)
+                async with ClientSession(*client_streams) as session:
+                    # As Claude Code does: the modern probe, then initialize where it is refused.
+                    with self.assertRaises(MCPError) as refused:
+                        await session.discover()
+                    await session.initialize()
+                    version, caps = session.protocol_version, session.server_capabilities
+                tg.cancel_scope.cancel()
+        self.assertEqual(refused.exception.error.code, types.METHOD_NOT_FOUND)
+        self.assertNotIn(version, MODERN_PROTOCOL_VERSIONS)
+        self.assertEqual(caps.experimental, channel.CAPABILITIES)
+
+
 if __name__ == '__main__':
     unittest.main()

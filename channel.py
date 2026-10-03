@@ -39,6 +39,7 @@ from typing import Dict, List, Optional, Tuple
 
 import anyio
 import mcp.types as types
+from mcp.server.runner import serve_loop
 from mcp.shared.message import SessionMessage
 
 from gate import HOLD, INTERJECT, REACT, REPLY, TEXT_CHARS, Decision, Gate, JevError, Message as GateMessage
@@ -52,6 +53,26 @@ logger = logging.getLogger(__name__)
 CHANNEL_METHOD = 'notifications/claude/channel'
 PERMISSION_REQUEST_METHOD = 'notifications/claude/channel/permission_request'
 PERMISSION_METHOD = 'notifications/claude/channel/permission'
+# What a channel server declares, under capabilities.experimental, which is
+# where Claude Code looks. Permission relay is safe to offer: only the
+# operator can answer.
+CAPABILITIES = {'claude/channel': {}, 'claude/channel/permission': {}}
+
+
+async def serve_legacy(server, read_stream, write_stream, options) -> None:
+    """Serve one connection on the legacy handshake only: Server.run's lifespan,
+    with serve_loop where Server.run drives serve_dual_era_loop.
+
+    Claude Code delivers a channel only on a legacy connection. On one that
+    negotiated a modern revision (2026-07-28) it skips it, "no unsolicited
+    notification path". From 2.1.286 it opens with a server/discover probe, and
+    Server.run lets that first request make the connection modern: the channel
+    was skipped, notifications/initialized never came, and the poller never
+    started. serve_loop answers the probe with Method not found, the answer of a
+    server from before it, and the client falls back to initialize.
+    """
+    async with server.lifespan(server) as state:
+        await serve_loop(server, read_stream, write_stream, lifespan_state=state, init_options=options)
 # "yes abcde" / "no abcde", optionally after an @mention. Claude Code's request IDs
 # are five lowercase letters without 'l'; /i tolerates phone autocapitalization.
 PERMISSION_REPLY_RE = re.compile(r'^\s*(?:@\S+\s+)?(y|yes|n|no)\s+([a-km-z]{5})\s*$', re.IGNORECASE)

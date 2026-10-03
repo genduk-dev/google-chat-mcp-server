@@ -660,7 +660,8 @@ def run_channel(args) -> None:
     import anyio
     from mcp.server.stdio import stdio_server
     from mcp.shared.message import SessionMessage
-    from channel import Channel, ChannelStore, INSTRUCTIONS, PERMISSION_REQUEST_METHOD, gate_instructions
+    from channel import (CAPABILITIES, Channel, ChannelStore, INSTRUCTIONS, PERMISSION_REQUEST_METHOD,
+                         gate_instructions, serve_legacy)
     from gate import from_env as gate_from_env
     from google_chat import BOT_NAME
 
@@ -741,9 +742,7 @@ def run_channel(args) -> None:
 
     server = app._mcp_server
     server.instructions = INSTRUCTIONS + (gate_instructions(gate) if gate else '')
-    # Permission relay is safe to offer: only the operator can answer.
-    options = server.create_initialization_options(
-        experimental_capabilities={'claude/channel': {}, 'claude/channel/permission': {}})
+    options = server.create_initialization_options(experimental_capabilities=CAPABILITIES)
 
     async def main():
         initialized = anyio.Event()
@@ -774,7 +773,7 @@ def run_channel(args) -> None:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(relay, read_stream, tg)
                 tg.start_soon(channel.run, write_stream, initialized)
-                await server.run(from_client, write_stream, options)
+                await serve_legacy(server, from_client, write_stream, options)
                 tg.cancel_scope.cancel()
 
     anyio.run(main)
