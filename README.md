@@ -17,6 +17,10 @@ send in Chat into a Claude Code session and relays its permission prompts back.
   from your real read state, and marks them read when asked.
 - **Sends like you would.** Markdown links and bold turn into Chat's own
   formatting, messages can go to a thread or quote another, and files attach.
+- **Keeps files in one directory.** Attachments it saves and files it sends
+  live in one directory, so a server on another machine never reads its own
+  files or fetches a URL for an agent. Behind mcp-gateway, the gateway's links
+  carry files between that directory and you.
 - **Links back into Chat.** Spaces, DMs, threads, search results and pins carry
   a link that opens them in the Chat app.
 - **Covers the rest of Chat.** Search, reactions (custom emoji too), pins,
@@ -66,12 +70,18 @@ Add the server to your MCP config (`~/.mcp.json` or a project `.mcp.json`):
     "GoogleChat": {
       "command": "uv",
       "args": ["run", "--directory", "/path/to/google-chat-mcp-server", "server.py",
-               "--token-path", "/path/to/credentials-dir/token.json"],
+               "--token-path", "/path/to/credentials-dir/token.json", "--allow-any-path"],
       "env": {"BOT_NAME": "Genduk"}
     }
   }
 }
 ```
+
+`--allow-any-path` lets `send_message` attach any file on this machine and an
+HTTP(S) URL, which suits a server that runs beside its agent. Without it, the
+server saves attachments to, and attaches files from, one directory only:
+`files/` beside the token, or the one `--files-dir` names. Files a channel
+delivered (below) can be attached either way.
 
 Then ask the agent to sign in. Its `authenticate` tool returns a Google link;
 open it, allow access, and the token is saved on its own. Only when the browser
@@ -204,6 +214,32 @@ Give the server behind the gateway the same `BOT_NAME` and token path. The
 channel tells its own replies apart by the name they are tagged with, so a
 different name makes it deliver them back to the session.
 
+Leave `--allow-any-path` off behind a gateway. The server runs on the
+gateway's machine, so any other path is that machine's own files, the token
+among them, and a URL would be fetched from inside its network. With
+[mcp-gateway](https://github.com/husniadil/mcp-gateway), give the server a
+`filesDir`:
+
+```json
+{
+  "mcpServers": {
+    "GoogleChat": {
+      "command": "/path/to/google-chat-mcp-server/.venv/bin/python",
+      "args": ["/path/to/google-chat-mcp-server/server.py",
+               "--token-path", "/path/to/credentials-dir/token.json"],
+      "filesDir": "/path/to/files/google-chat"
+    }
+  }
+}
+```
+
+The gateway passes the directory as `MCP_GATEWAY_FILES_DIR` and lists its own
+`gateway_upload_url`, `gateway_uploaded_file` and `gateway_download_url`
+beside the Chat tools. `download_attachment` saves into the directory, and
+`gateway_download_url` turns the path into a link you open or an agent fetches
+with curl. A file you upload through a `gateway_upload_url` link lands there
+too, ready for `send_message`.
+
 ## Learn more
 
 | If you want to | Read |
@@ -224,6 +260,13 @@ different name makes it deliver them back to the session.
 - **The person says who somebody is:** save it as that person's note with
   `set_user_name`, and every later read shows it after their name, as
   "Dewi (Software Engineer)".
+- **`send_message` refuses a path or a URL:** the server attaches only files
+  in its files directory. Behind mcp-gateway, bring the file there with
+  `gateway_upload_url`. On the person's own machine, the config wants
+  `--allow-any-path`.
+- **The person wants an attachment:** `download_attachment`, then
+  `gateway_download_url` with its path when that tool is listed, and give
+  them the link.
 - **Starting a channel session:** use the channel config together with
   `--dangerously-load-development-channels`, never one without the other.
 - **Ask the person first** before sending, editing or deleting in someone

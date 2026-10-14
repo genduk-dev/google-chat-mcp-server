@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict
 
 from fastmcp import FastMCP
-from google_chat import list_chat_spaces, DEFAULT_CALLBACK_URL, set_token_path, set_filter_messages
+from google_chat import list_chat_spaces, DEFAULT_CALLBACK_URL, configure_files, set_token_path, set_filter_messages
 from server_auth import run_auth_server
 from auth_cli import run_cli_auth
 
@@ -239,7 +239,11 @@ async def send_message(space_name: str, text: str, thread_key: str = None, threa
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
         quote_reply_message_name: Optional message resource name to quote-reply to (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
-        file_paths: Optional list of local file paths or HTTP(S) URLs to upload as attachments
+        file_paths: Optional list of files to attach, each a path under this server's files
+                    directory: one download_attachment or gateway_uploaded_file returned, or
+                    a path relative to that directory. Any other path and any URL are refused
+                    unless the server runs with --allow-any-path. To attach a file the user
+                    or another machine has, get it here with gateway_upload_url when listed.
         filenames: Optional list of display names for the attachments (matched by index to file_paths)
 
     Returns:
@@ -289,8 +293,9 @@ async def update_message(message_name: str, text: str = None, file_paths: list =
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
         text: New text content for the message, formatted as for send_message.
               If not provided, text is not changed.
-        file_paths: List of local file paths or HTTP(S) URLs to upload as attachments.
-                   If provided, replaces any existing attachments. If not provided, attachments are not changed.
+        file_paths: List of files to attach, as for send_message (paths under this server's
+                   files directory). If provided, replaces any existing attachments. If not
+                   provided, attachments are not changed.
         filenames: List of display names for the attachments (matched by index to file_paths).
         remove_quote_reply: If True, removes the quoted message from this message.
                            Note: quote replies can only be removed, not added via edit.
@@ -600,23 +605,25 @@ async def delete_reaction(reaction_name: str) -> str:
     return _json(await _delete_reaction(reaction_name))
 
 @mcp.tool(output_schema=None)
-async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: str = None) -> str:
-    """Download a file attachment from a Google Chat message.
+async def download_attachment(resource_name: str, content_name: str = None) -> str:
+    """Save a file attachment from a Google Chat message into this server's files directory.
 
     Use this after get_message or get_messages returns a message with
     an 'attachment' field. Pass the resourceName and contentName from the attachment metadata.
+    The path is on the machine this server runs on. To hand the file to the user or to an
+    agent elsewhere, pass the path to gateway_download_url when that tool is listed. The
+    path can also go straight into send_message's file_paths.
 
     Args:
         resource_name: The resourceName string from the attachment's metadata
                       (base64-encoded, from attachmentDataRef)
-        save_dir: Directory to save the file (default: /tmp)
         content_name: Original filename (e.g. 'image.png') for correct file extension
 
     Returns:
         Dict with path (saved file location), contentName, contentType, and size in bytes
     """
     from google_chat import download_attachment as _download
-    return _json(await _download(resource_name, save_dir, content_name))
+    return _json(await _download(resource_name, content_name))
 
 @mcp.tool(output_schema=None)
 def authenticate() -> str:
@@ -663,13 +670,15 @@ def run_channel(args) -> None:
     from channel import (CAPABILITIES, Channel, ChannelStore, INSTRUCTIONS, PERMISSION_REQUEST_METHOD,
                          gate_instructions, serve_legacy)
     from gate import from_env as gate_from_env
-    from google_chat import BOT_NAME
+    from google_chat import BOT_NAME, attach_also_from
 
     app = FastMCP("Google Chat") if args.channel_only else mcp
     state_path = Path(args.channel_state_path or Path(args.token_path).parent / 'channel_state.json')
     # A bad CHANNEL_GATE setup fails the start rather than running on the rules unasked.
     gate = gate_from_env(BOT_NAME)
     channel = Channel(ChannelStore(state_path), args.poll_seconds, gate=gate)
+    # The session gets these paths with each delivery, so it may forward the files.
+    attach_also_from(channel.attachments_dir)
 
     def watch_space(space_name: str, allowed_senders: List[str] = None, mention_only: bool = False) -> str:
         """Start pushing new messages from a Google Chat space into this Claude Code session,
@@ -790,6 +799,10 @@ if __name__ == "__main__":
     parser.add_argument('--channel-only', action='store_true', help='With --channel, serve only the watch tools; the Chat tools come from another server')
     parser.add_argument('--channel-state-path', help='Where watched spaces are stored (default: channel_state.json next to the token)')
     parser.add_argument('--poll-seconds', type=float, default=5.0, help='Channel poll interval in seconds (default: 5)')
+    parser.add_argument('--files-dir', help='Where attachments are saved and the only place file_paths are read from '
+                                            '(default: MCP_GATEWAY_FILES_DIR, else files/ next to the token)')
+    parser.add_argument('--allow-any-path', action='store_true',
+                        help='Let file_paths name any local file or an HTTP(S) URL, for a server that runs beside its agent')
 
     args = parser.parse_args()
     if args.channel_only and not args.channel:
@@ -800,6 +813,11 @@ if __name__ == "__main__":
 
     # Set message filtering (disabled when --raw-messages is used)
     set_filter_messages(not args.raw_messages)
+
+    try:
+        configure_files(args.files_dir, args.token_path, args.allow_any_path)
+    except (ValueError, OSError) as e:
+        parser.error(str(e))
 
     if args.auth == 'web':
         print(f"\nStarting OAuth authentication server at http://{args.host}:{args.port}")
