@@ -1218,14 +1218,13 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         thread_key: Optional thread key for bot-initiated threads (creates new thread if not found)
         thread_name: Optional thread name to reply in an existing thread (format: 'spaces/SPACE_ID/threads/THREAD_ID')
         quote_reply_message_name: Optional message resource name to quote-reply to (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
-        file_paths: Optional list of local file paths or HTTP(S) URLs to upload as attachments
+        file_paths: Optional list of files to upload as attachments (see attachment_source)
         filenames: Optional list of display names for the attachments (matched by index to file_paths)
 
     Returns:
         The created message object
     """
     import mimetypes
-    import tempfile
     from googleapiclient.http import MediaFileUpload
 
     try:
@@ -1253,19 +1252,9 @@ async def send_space_message(space_name: str, text: str, thread_key: Optional[st
         if file_paths:
             attachments = []
             for i, fp in enumerate(file_paths):
-                local_path = fp
-                temp_file = None
-                if fp.startswith('http://') or fp.startswith('https://'):
-                    url_path = urllib.parse.urlparse(fp).path
-                    ext = os.path.splitext(url_path)[1] or '.bin'
-                    temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                    temp_file.close()
-                    local_path = temp_file.name
-                    temp_files.append(local_path)
-                    urllib.request.urlretrieve(fp, local_path)
-
-                if not os.path.exists(local_path):
-                    raise Exception(f"File not found: {local_path}")
+                local_path, temp_file = attachment_source(fp)
+                if temp_file:
+                    temp_files.append(temp_file)
 
                 fname = (filenames[i] if filenames and i < len(filenames) else None) or os.path.basename(local_path)
                 mime_type, _ = mimetypes.guess_type(local_path)
@@ -1378,7 +1367,7 @@ async def update_message(message_name: str, text: str = None, file_paths: Option
         message_name: The resource name of the message to update
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
         text: New text content for the message. If None, text is not changed.
-        file_paths: List of local file paths or HTTP(S) URLs to upload as attachments.
+        file_paths: List of files to upload as attachments (see attachment_source).
                    If provided, replaces any existing attachments. If None, attachments are not changed.
         filenames: List of display names for the attachments (matched by index to file_paths).
         remove_quote_reply: If True, removes the quoted message from this message.
@@ -1388,7 +1377,6 @@ async def update_message(message_name: str, text: str = None, file_paths: Option
         The updated message object with name, createTime, lastUpdateTime, text, and thread
     """
     import mimetypes
-    import tempfile
     from googleapiclient.http import MediaFileUpload
 
     temp_files = []
@@ -1414,18 +1402,9 @@ async def update_message(message_name: str, text: str = None, file_paths: Option
             attachments = []
 
             for i, fp in enumerate(file_paths):
-                local_path = fp
-                if fp.startswith('http://') or fp.startswith('https://'):
-                    url_path = urllib.parse.urlparse(fp).path
-                    ext = os.path.splitext(url_path)[1] or '.bin'
-                    temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                    temp_file.close()
-                    local_path = temp_file.name
-                    temp_files.append(local_path)
-                    urllib.request.urlretrieve(fp, local_path)
-
-                if not os.path.exists(local_path):
-                    raise Exception(f"File not found: {local_path}")
+                local_path, temp_file = attachment_source(fp)
+                if temp_file:
+                    temp_files.append(temp_file)
 
                 fname = (filenames[i] if filenames and i < len(filenames) else None) or os.path.basename(local_path)
                 mime_type, _ = mimetypes.guess_type(local_path)
@@ -2073,15 +2052,99 @@ async def delete_reaction(reaction_name: str) -> Dict:
         raise Exception(f"Failed to delete reaction: {str(e)}")
 
 
-async def download_attachment(resource_name: str, save_dir: str = '/tmp', content_name: Optional[str] = None) -> Dict:
-    """Download a file attachment from a Google Chat message.
+# Set by mcp-gateway for a server it gives a filesDir: the directory its links reach.
+FILES_DIR_ENV = 'MCP_GATEWAY_FILES_DIR'
+
+files_policy = {
+    'dir': None,
+    'any_path': False,
+    # Other directories file_paths may name: the channel's delivered attachments.
+    'also': [],
+}
+
+
+def configure_files(files_dir: Optional[str], token_path: str, any_path: bool = False,
+                    environ=os.environ) -> Path:
+    """Set where attachments are saved and which file_paths are attached, and create the
+    directory 0700.
+
+    The directory is files_dir (--files-dir), else MCP_GATEWAY_FILES_DIR, else files/
+    beside the token. A flag that disagrees with the gateway fails the start, since the
+    gateway's links would reach another directory than the one this server writes.
+    file_paths may also name a file in attachments/ beside the token, where a channel
+    saves the attachments it delivers.
+    """
+    from_env = environ.get(FILES_DIR_ENV)
+    if files_dir and from_env and os.path.realpath(os.path.expanduser(files_dir)) != os.path.realpath(from_env):
+        raise ValueError(f"--files-dir {files_dir} is not {FILES_DIR_ENV}={from_env}, the directory the gateway's links reach")
+    beside_token = Path(token_path).expanduser().parent
+    chosen = Path(os.path.expanduser(files_dir or from_env or str(beside_token / 'files')))
+    chosen.mkdir(mode=0o700, parents=True, exist_ok=True)
+    files_policy['dir'] = chosen
+    files_policy['any_path'] = any_path
+    # Where a channel sharing this token saves what it delivers, so a session can
+    # forward such a file through this server even when the channel runs apart.
+    attach_also_from(beside_token / 'attachments')
+    return chosen
+
+
+def attach_also_from(directory: Path) -> None:
+    """Let file_paths name a file in this directory too, such as one the channel delivered."""
+    files_policy['also'].append(Path(directory))
+
+
+def files_dir() -> Path:
+    if files_policy['dir'] is None:
+        raise RuntimeError("The files directory is not configured; call configure_files first")
+    return files_policy['dir']
+
+
+def attachment_source(entry: str) -> Tuple[str, Optional[str]]:
+    """The local file to upload for one file_paths entry, and a temporary file to delete after.
+
+    By default the entry must name a regular file inside the files directory, and a URL is
+    refused. This server can run on a host the agent does not share (behind mcp-gateway),
+    where any other path is that host's own files, the OAuth token among them, and a URL is
+    fetched from inside its network. --allow-any-path restores any local path and any URL,
+    for a server that runs beside its agent.
+    """
+    if files_policy['any_path']:
+        if entry.startswith('http://') or entry.startswith('https://'):
+            import tempfile
+            ext = os.path.splitext(urllib.parse.urlparse(entry).path)[1] or '.bin'
+            temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+            temp_file.close()
+            try:
+                urllib.request.urlretrieve(entry, temp_file.name)
+            except BaseException:
+                os.unlink(temp_file.name)
+                raise
+            return temp_file.name, temp_file.name
+        if not os.path.exists(entry):
+            raise Exception(f"File not found: {entry}")
+        return entry, None
+
+    root = os.path.realpath(files_dir())
+    if '://' in entry:
+        raise Exception(f"A URL is not fetched: put the file in {root} first "
+                        "(through gateway_upload_url when this server is behind mcp-gateway)")
+    real = os.path.realpath(os.path.join(root, entry))
+    roots = [root, *(os.path.realpath(d) for d in files_policy['also'])]
+    if not any(real != r and os.path.commonpath([r, real]) == r for r in roots):
+        raise Exception(f"Only a file under {root} can be attached: {entry}")
+    if not os.path.isfile(real):
+        raise Exception(f"File not found: {entry}")
+    return real, None
+
+
+async def download_attachment(resource_name: str, content_name: Optional[str] = None) -> Dict:
+    """Download a file attachment from a Google Chat message into the files directory.
 
     Uses the Chat API media endpoint with the attachment's resourceName
     (base64-encoded, from attachmentDataRef).
 
     Args:
         resource_name: The resourceName from attachmentDataRef (base64 string)
-        save_dir: Directory to save the downloaded file (default: /tmp)
         content_name: Original filename from attachment metadata (e.g. 'image.png').
                      Used as fallback for file extension when API returns generic content type.
 
@@ -2092,7 +2155,7 @@ async def download_attachment(resource_name: str, save_dir: str = '/tmp', conten
         creds = get_credentials()
         if not creds:
             raise Exception("No valid credentials found. Please authenticate first.")
-        return save_attachment(creds, resource_name, save_dir, content_name)
+        return save_attachment(creds, resource_name, str(files_dir()), content_name)
     except Exception as e:
         raise Exception(f"Failed to download attachment: {str(e)}")
 
@@ -2131,6 +2194,9 @@ def save_attachment(creds: Credentials, resource_name: str, save_dir: str,
     ext = ext_map.get(content_type)
     if not ext and content_name:
         _, ext = os.path.splitext(content_name)
+        # The sender names the file, so only letters and digits pass into the saved name.
+        if not re.fullmatch(r'\.[A-Za-z0-9]{1,10}', ext):
+            ext = ''
     if not ext:
         ext = '.bin'
     filename = f"gchat-{uuid.uuid4().hex[:8]}{ext}"

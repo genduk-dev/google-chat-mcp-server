@@ -57,6 +57,23 @@ found, and Claude Code falls back to `initialize`. The plain server keeps both
 eras. Do not move the channel back to `Server.run` until Claude Code delivers
 channels on a modern connection.
 
+### A path is read only from the files directory
+
+The server may run on a host its agent does not share (behind mcp-gateway).
+There any path is that host's own files, the token among them, and a URL is
+fetched from inside its network; on exe.dev, `*.int.exe.xyz` answers with the
+VM's own credentials added. So by default `attachment_source` attaches only a
+file under the files directory, or in a channel's `attachments/`, and refuses
+every URL, and `download_attachment` writes only into the files directory. A
+sender names an attachment, so the extension taken from that name is letters
+and digits. `--allow-any-path` restores any path and URL, for a server that
+runs beside its agent.
+
+The directory is `--files-dir`, else `MCP_GATEWAY_FILES_DIR` (which
+mcp-gateway sets for a server with `filesDir`, and whose links reach it), else
+`files/` beside the token. A flag that disagrees with the gateway fails the
+start.
+
 ### A write that failed with a 5xx may have happened
 
 Retry a 429 for any method: Google did not process it. Retry a 5xx only for a
