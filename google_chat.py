@@ -13,6 +13,7 @@ os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
 import logging
 import datetime
 import json
+import mimetypes
 import random
 import re
 import uuid
@@ -2184,6 +2185,11 @@ def save_attachment(creds: Credentials, resource_name: str, save_dir: str,
             if max_bytes is not None and size > max_bytes:
                 raise AttachmentTooLarge(f"larger than {max_bytes} bytes")
     data = b''.join(chunks)
+
+    # The media endpoint answered application/octet-stream for a PNG (2026-10-14),
+    # so the type the attachment's name implies is the better label when it has one.
+    if content_name and content_type.split(';')[0].strip().lower() == 'application/octet-stream':
+        content_type = mimetypes.guess_type(content_name)[0] or content_type
 
     # Determine file extension: prefer content type, fallback to content_name
     ext_map = {

@@ -175,6 +175,23 @@ class DownloadAttachmentTest(FilesPolicyCase):
         for name in ['a.p/../../x', 'a.‮gpj', 'a.' + 'x' * 11, 'noext']:
             self.assertTrue(self.download(name)['path'].endswith('.bin'), name)
 
+    def test_a_generic_type_from_google_takes_the_type_the_name_implies(self):
+        # Google's media endpoint answered application/octet-stream for a PNG.
+        for header in ['application/octet-stream', 'application/octet-stream; charset=binary']:
+            saved = self.download('Screenshot.png', header)
+            self.assertEqual(saved['contentType'], 'image/png', header)
+            self.assertTrue(saved['path'].endswith('.png'), header)
+        self.assertEqual(self.download('doc.pdf')['contentType'], 'application/pdf')
+
+    def test_a_name_with_no_known_type_keeps_the_generic_one(self):
+        for name in ['noext', 'evil.pth', None]:
+            self.assertEqual(self.download(name)['contentType'], 'application/octet-stream', name)
+
+    def test_a_specific_type_from_google_wins_over_the_name(self):
+        saved = self.download('photo.png', 'application/pdf')
+        self.assertEqual(saved['contentType'], 'application/pdf')
+        self.assertTrue(saved['path'].endswith('.pdf'))
+
 
 if __name__ == '__main__':
     unittest.main()
