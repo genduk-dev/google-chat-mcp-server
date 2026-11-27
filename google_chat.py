@@ -12,6 +12,7 @@ os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
 
 import logging
 import datetime
+import html
 import json
 import mimetypes
 import random
@@ -631,6 +632,182 @@ def to_chat_markup(text: str) -> str:
     return ''.join(out)
 
 
+# Card fields that carry human-readable text, across cardsV2 widgets and legacy cards.
+_CARD_TEXT_KEYS = ('title', 'subtitle', 'topLabel', 'text', 'bottomLabel', 'content', 'label')
+
+
+def _strip_html(value: str) -> str:
+    """Turns the small HTML subset Chat cards allow into plain text."""
+    value = re.sub(r'<br\s*/?>', '\n', value, flags=re.IGNORECASE)
+    value = re.sub(r'<[^>]+>', '', value)
+    return html.unescape(value).strip()
+
+
+def _html_to_markdown(value: str) -> str:
+    """Turns the HTML subset Chat cards allow (b, i, s, u, font, a, br) into markdown."""
+    value = re.sub(r'<br\s*/?>', '\n', value, flags=re.IGNORECASE)
+    value = re.sub(r'<a\s[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', r'[\2](\1)', value,
+                   flags=re.IGNORECASE | re.DOTALL)
+    # Opening tags may carry attributes (<b class="x">); both tags must map, or a stray marker is left.
+    value = re.sub(r'</?(?:b|strong)(?:\s[^>]*)?>', '**', value, flags=re.IGNORECASE)
+    value = re.sub(r'</?(?:i|em)(?:\s[^>]*)?>', '_', value, flags=re.IGNORECASE)
+    value = re.sub(r'</?(?:s|strike|del)(?:\s[^>]*)?>', '~~', value, flags=re.IGNORECASE)
+    value = re.sub(r'<[^>]+>', '', value)  # u, font and anything else: keep the text
+    return html.unescape(value).strip()
+
+
+def _card_url(on_click: Optional[Dict]) -> Optional[str]:
+    return ((on_click or {}).get('openLink') or {}).get('url')
+
+
+def _card_link(text: str, on_click: Optional[Dict]) -> str:
+    url = _card_url(on_click)
+    return f'[{text}]({url})' if url and text else text
+
+
+def _button_link(button: Dict) -> str:
+    """A button or chip as a link. Icon-only buttons fall back to their alt text, then to the URL."""
+    text = (_strip_html(button.get('text') or button.get('label') or '')
+            or button.get('altText') or (button.get('icon') or {}).get('altText') or '')
+    url = _card_url(button.get('onClick'))
+    if not text:
+        return f'<{url}>' if url else ''
+    return _card_link(text, button.get('onClick'))
+
+
+def _generic_text(node) -> List[str]:
+    """Fallback for widgets without a dedicated renderer: every text-bearing field."""
+    parts: List[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _CARD_TEXT_KEYS and isinstance(value, str):
+                cleaned = _strip_html(value)
+                if cleaned:
+                    parts.append(cleaned)
+            else:
+                parts.extend(_generic_text(value))
+    elif isinstance(node, list):
+        for item in node:
+            parts.extend(_generic_text(item))
+    return parts
+
+
+def _widget_to_markdown(widget: Dict) -> List[str]:
+    """Renders one cardsV2 widget as markdown lines."""
+    if 'textParagraph' in widget:
+        text = _html_to_markdown(widget['textParagraph'].get('text', ''))
+        return [text] if text else []
+    if 'decoratedText' in widget:
+        d = widget['decoratedText']
+        text = _html_to_markdown(d.get('text', ''))
+        url = _card_url(d.get('onClick'))
+        if url and text and '](' in text:
+            text = f'{text} · <{url}>'  # wrapping a text that already holds a link would nest links
+        else:
+            text = _card_link(text, d.get('onClick'))
+        label = _html_to_markdown(d.get('topLabel', ''))
+        line = f'**{label}** : {text}' if label and text else (label or text)
+        bottom = _html_to_markdown(d.get('bottomLabel', ''))
+        if bottom:
+            line = f'{line} · _{bottom}_' if line else f'_{bottom}_'
+        button_link = _button_link(d.get('button') or {})
+        if button_link:
+            line = f'{line} · {button_link}' if line else button_link
+        return [f'- {line}'] if line else []
+    if 'buttonList' in widget or 'chipList' in widget:
+        items = (widget.get('buttonList') or {}).get('buttons') or (widget.get('chipList') or {}).get('chips') or []
+        links = [link for link in map(_button_link, items) if link]
+        return [' · '.join(links)] if links else []
+    if 'columns' in widget:
+        # Each column becomes its own list item, so a "label | value" layout spans two lines.
+        lines = []
+        for column in widget['columns'].get('columnItems', []):
+            cells = [line.removeprefix('- ') for w in column.get('widgets', [])
+                     for line in _widget_to_markdown(w)]
+            if cells:
+                lines.append('- ' + ' '.join(cells))
+        return lines
+    if 'grid' in widget:
+        g = widget['grid']
+        lines = [f"**{_strip_html(g['title'])}**"] if g.get('title') else []
+        for item in g.get('items', []):
+            text = ' : '.join(_strip_html(item[k]) for k in ('title', 'subtitle') if item.get(k))
+            if text:
+                lines.append(f'- {text}')
+        return lines
+    if 'divider' in widget:
+        # Blank lines around the rule, or the line above it would read as a setext heading.
+        return ['', '---', '']
+    if 'image' in widget:
+        image = widget['image']
+        return [f"![{image.get('altText', '')}]({image['imageUrl']})"] if image.get('imageUrl') else []
+    return _generic_text(widget)
+
+
+def _card_to_markdown(card: Dict) -> List[str]:
+    blocks: List[str] = []
+    header = card.get('header') or {}
+    if header.get('title'):
+        blocks.append(f"## {_strip_html(header['title'])}")
+    if header.get('subtitle'):
+        blocks.append(f"_{_strip_html(header['subtitle'])}_")
+    for section in card.get('sections', []):
+        if section.get('header'):
+            blocks.append(f"### {_strip_html(section['header'])}")
+        lines = [line for w in section.get('widgets', []) for line in _widget_to_markdown(w)]
+        block = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip('\n')
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _legacy_widget(widget: Dict) -> Dict:
+    """Maps a legacy `cards` widget onto its cardsV2 equivalent, so both render the same way."""
+    def button(b: Dict) -> Dict:
+        if 'textButton' in b:
+            return {'text': b['textButton'].get('text', ''), 'onClick': b['textButton'].get('onClick')}
+        image = b.get('imageButton') or {}
+        return {'altText': image.get('name', ''), 'onClick': image.get('onClick')}
+
+    if 'keyValue' in widget:
+        kv = widget['keyValue']
+        decorated = {'topLabel': kv.get('topLabel', ''), 'text': kv.get('content', ''),
+                     'bottomLabel': kv.get('bottomLabel', ''), 'onClick': kv.get('onClick')}
+        if kv.get('button'):
+            decorated['button'] = button(kv['button'])
+        return {'decoratedText': decorated}
+    if 'buttons' in widget:
+        return {'buttonList': {'buttons': [button(b) for b in widget['buttons']]}}
+    return widget  # textParagraph and image share the cardsV2 shape
+
+
+def _legacy_card(card: Dict) -> Dict:
+    return {
+        'header': card.get('header') or {},
+        'sections': [dict(section, widgets=[_legacy_widget(w) for w in section.get('widgets', [])])
+                     for section in card.get('sections', [])],
+    }
+
+
+def extract_cards_text(message: Dict) -> Optional[str]:
+    """Renders a message's cards (cardsV2 and legacy cards) as markdown.
+
+    Messages posted by bots and webhooks (CI, monitoring, ...) often carry their
+    whole content in cards and leave `text` empty, so without this they read as blank.
+    Card headers become headings, labelled values become `**label** : value`, and
+    buttons and clickable texts keep their links.
+
+    Returns:
+        The cards as markdown, or None if the message has no card text.
+    """
+    blocks: List[str] = []
+    for entry in message.get('cardsV2', []):
+        blocks.extend(_card_to_markdown(entry.get('card') or {}))
+    for legacy in message.get('cards', []):
+        blocks.extend(_card_to_markdown(_legacy_card(legacy)))
+    return '\n\n'.join(blocks) or None
+
+
 def _attachment_fields(a: Dict) -> Dict:
     fields = {'contentName': a.get('contentName'), 'contentType': a.get('contentType'),
               'resourceName': a.get('attachmentDataRef', {}).get('resourceName')}
@@ -823,6 +1000,9 @@ def _compact_message(msg: Dict, creds: Credentials, space_name: str) -> Dict:
     if msg.get('lastUpdateTime'):
         out['edited'] = _short_time(msg['lastUpdateTime'])
     out['text'] = message_text(msg)
+    cards_text = extract_cards_text(msg)
+    if cards_text:
+        out['cards_text'] = cards_text
     quoted = msg.get('quotedMessageMetadata', {}).get('name')
     if quoted:
         out['quoted'] = quoted.removeprefix(prefix)
@@ -1206,6 +1386,9 @@ async def search_space_messages(query: str,
             'text': message_text(msg),
             'thread': msg.get('thread'),
         })
+        cards_text = extract_cards_text(msg)
+        if cards_text:
+            filtered_messages[-1]['cards_text'] = cards_text
 
     return {'messages': filtered_messages, 'nextPageToken': next_token}
 
@@ -1349,6 +1532,9 @@ async def get_message(message_name: str) -> Dict:
             'text': message_text(msg),
             'thread': msg.get('thread'),
         }
+        cards_text = extract_cards_text(msg)
+        if cards_text:
+            result['cards_text'] = cards_text
         if msg.get('quotedMessageMetadata'):
             result['quotedMessageMetadata'] = msg['quotedMessageMetadata']
         result['threadReply'] = msg.get('threadReply', False)

@@ -71,7 +71,9 @@ async def get_messages(space_name: str,
     quote replies and attachments. Pass a group's "thread" as send_message's thread_name
     to reply in it. Optional message fields appear only when set: sender_type (when not
     HUMAN), sent_by_app, root (the thread's first message), edited, quoted, attachment,
-    reactions ({emoji or :custom_name:: count}).
+    reactions ({emoji or :custom_name:: count}), cards_text (a message posted as cards, as
+    bots and webhooks do, rendered as markdown: headings, labelled values, links; its
+    text is often empty).
 
     Args:
         space_name: The space to fetch messages from ('spaces/SPACE_ID')
@@ -191,8 +193,9 @@ async def search_messages(query: str,
         page_token: nextPageToken from a previous call, to fetch the next page
 
     Returns:
-        {'messages': [{'name', 'space', 'link', 'sender', ..., 'text', 'thread'}],
+        {'messages': [{'name', 'space', 'link', 'sender', ..., 'text', 'thread', 'cards_text'?}],
         'nextPageToken': str or None} — "link" opens the message in Google Chat;
+        cards_text is a card message rendered as markdown (see get_messages);
         nextPageToken is None when there are no further results
 
     Raises:
@@ -277,7 +280,8 @@ async def get_message(message_name: str) -> str:
                      (format: 'spaces/SPACE_ID/messages/MESSAGE_ID')
 
     Returns:
-        The message object with name, sender, createTime, text, and thread
+        The message object with name, sender, createTime, text, and thread, plus
+        cards_text when the message carries cards (see get_messages)
     """
     from google_chat import get_message as _get_message
     return _json(await _get_message(message_name))

@@ -26,6 +26,9 @@ send in Chat into a Claude Code session and relays its permission prompts back.
 - **Covers the rest of Chat.** Search, reactions (custom emoji too), pins,
   members, group chat lookup, space creation, edit and delete history, your
   own status and do-not-disturb, and a space's notification setting.
+- **Reads card messages.** Bots and webhooks (CI, monitoring, alerts) often
+  post cards and leave the text empty; those cards come back as markdown in a
+  `cards_text` field, with headings, labelled values and links.
 - **Names people Google cannot.** A deleted or hidden account shows as
   `users/ID`; tell the agent who it is and every later read shows the name.
 - **Runs as a Claude Code channel.** Messages in a watched space reach the
